@@ -724,7 +724,15 @@ function cleanReason(raw: unknown): string | undefined {
     .replace(/\s+/g, ' ')
     .trim();
   if (flat === '') return undefined;
-  return flat.length > MAX_REASON ? `${flat.slice(0, MAX_REASON - 1)}…` : flat;
+  if (flat.length <= MAX_REASON) return flat;
+  // Cut by Unicode code point, never by raw UTF-16 unit: slicing at a fixed offset can land
+  // inside a surrogate pair (an emoji, say) and leave a lone surrogate behind, which
+  // validateMemo then refuses as not well-formed — turning a harmless long reason into a
+  // fine that cannot be recorded at all.
+  const codePoints = Array.from(flat);
+  return codePoints.length > MAX_REASON
+    ? `${codePoints.slice(0, MAX_REASON - 1).join('')}…`
+    : flat;
 }
 
 /** Same rules the ledger applies to memo.nonce, checked up front so nothing is written first. */

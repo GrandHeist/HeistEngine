@@ -582,6 +582,20 @@ export function engineSuite(factory: BackendFactory): void {
       assert.ok(detail.length <= 'fine — '.length + 120);
     });
 
+    test('a reason truncated right at a surrogate pair stays well-formed', async () => {
+      await openAccount('player-1');
+      // 118 plain chars + one astral emoji (two UTF-16 units) + more text: the old
+      // code-unit slice(0, 119) cut the emoji in half and left a lone surrogate, which
+      // validateMemo rejects outright — the whole Fine then failed for an unrelated reason.
+      const reason = `${'x'.repeat(118)}\u{1F600}${'y'.repeat(10)}`;
+      const result = expectOk(
+        await engine.submit({ type: 'Fine', nonce: nonce('fine'), actor: 'player-1', amount: '10', reason }),
+      );
+      const detail = (await backend.getTx(result.txId))?.memo.detail ?? '';
+      assert.ok(detail.isWellFormed(), `detail must be well-formed Unicode, got ${JSON.stringify(detail)}`);
+      assert.ok(detail.endsWith('\u2026'), 'a truncated reason still ends in the ellipsis marker');
+    });
+
     test('an all-whitespace reason is treated as no reason', async () => {
       await openAccount('player-1');
       const result = expectOk(
