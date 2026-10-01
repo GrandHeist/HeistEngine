@@ -357,6 +357,42 @@ function conformanceSuite(factory: BackendFactory): void {
       assert.equal((await backend.verifyIntegrity()).checked, 1);
     });
 
+    // A write can be wrong two ways at once (reused nonce AND an unknown wallet). The engine
+    // never produces this — it checks the nonce and resolves every wallet before it ever calls
+    // the backend — but the backend interface is public on its own, and every backend must pick
+    // the same winner. Memory and sqlite once disagreed here (memory checked wallets before
+    // replay guards, sqlite the other way round), invisible to the engine-level fuzz suite
+    // precisely because the engine never drives this path.
+    test('a reused nonce is reported even when the wallet it names is also unknown', async () => {
+      const alice = await wallet('alice');
+      const bob = await wallet('bob');
+      await backend.mint(alice.id, 100n, memo('Test', 'seed'));
+      await backend.transfer(alice.id, bob.id, 10n, memo('Test', 'dup'));
+
+      await rejectsWithCode(
+        backend.transfer(alice.id, 'no-such-wallet', 10n, memo('Test', 'dup')),
+        'DUPLICATE_NONCE',
+      );
+      await rejectsWithCode(backend.mint('no-such-wallet', 10n, memo('Test', 'dup')), 'DUPLICATE_NONCE');
+      await rejectsWithCode(backend.burn('no-such-wallet', 10n, memo('Test', 'dup')), 'DUPLICATE_NONCE');
+
+      assert.equal(await backend.getBalance(alice.id), 90n, 'nothing further moved');
+    });
+
+    test('a reused key is reported even when the wallet it names is also unknown', async () => {
+      const alice = await wallet('alice');
+      const bob = await wallet('bob');
+      await backend.mint(alice.id, 100n, memo('Test', 'seed'));
+      await backend.transfer(alice.id, bob.id, 10n, { intent: 'Test', key: 'dup-key' });
+
+      await rejectsWithCode(
+        backend.transfer(alice.id, 'no-such-wallet', 10n, { intent: 'Test', key: 'dup-key' }),
+        'DUPLICATE_KEY',
+      );
+
+      assert.equal(await backend.getBalance(alice.id), 90n, 'nothing further moved');
+    });
+
     // -----------------------------------------------------------------------
     // History
     // -----------------------------------------------------------------------

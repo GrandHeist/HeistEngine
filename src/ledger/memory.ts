@@ -186,18 +186,14 @@ export class MemoryBackend implements LedgerBackend {
     if (from === to) {
       throw new InvalidIntent('Cannot transfer to the same wallet');
     }
-    this.requireWallet(from);
-    this.requireWallet(to);
     return this.append({ kind: 'transfer', from, to, amount, memo });
   }
 
   async mint(to: WalletId, amount: bigint, memo: Memo): Promise<TxRef> {
-    this.requireWallet(to);
     return this.append({ kind: 'mint', from: null, to, amount, memo });
   }
 
   async burn(from: WalletId, amount: bigint, memo: Memo): Promise<TxRef> {
-    this.requireWallet(from);
     return this.append({ kind: 'burn', from, to: null, amount, memo });
   }
 
@@ -316,6 +312,11 @@ export class MemoryBackend implements LedgerBackend {
     if (nonce !== undefined && this.nonces.has(nonce)) throw new DuplicateNonce(nonce);
     const key = memo.key;
     if (key !== undefined && this.keys.has(key)) throw new DuplicateKey(key);
+
+    // Same order as SqliteBackend: shape, memo, replay guards, wallets, then funds — so a write
+    // that is invalid in more than one way reports the same code on every backend.
+    if (from !== null) this.requireWallet(from);
+    if (to !== null) this.requireWallet(to);
 
     // Debit side must be able to cover it. Mint has no debit side.
     if (from !== null) {
