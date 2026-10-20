@@ -8,7 +8,9 @@ An economy engine for GTA RP servers built around a swappable ledger backend. Ev
 the world (rent a bike, pay the hospital, get a payout, fines) is a typed intent that the engine turns
 into a transfer, mint or burn on an append-only, hash-chained ledger of player and entity wallets.
 
-The in-game currency is **HD** — Heist Dollars.
+The in-game currency's name is whatever the server owner sets in config — **HD** ("Heist Dollar")
+is just this project's own default placeholder, not a requirement. Everything lives in a ledger,
+which is what keeps this inside Rockstar/FiveM's rules around crypto-related content.
 
 ## What exists today
 

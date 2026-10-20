@@ -9,7 +9,10 @@
 
 A plugin that replaces a GTA RP server's in-game economy with a transparent, auditable ledger of player and NPC-entity wallets. Players spawn with a wallet, and every economic action (rent a bike, pay hospital, get paid for a job, fines, robberies) is a transfer, mint or burn on that ledger. The ledger backend is swappable behind one interface. Today three backends exist: **memory**, **SQLite** and **Postgres** (all off-chain). A **Solana** backend is planned, deliberately blocked, and is not a config flag (see below).
 
-This is a private friends server. No real-money entry/exit, no sale of HD, no advertised public listing. HD = "Heist Dollar," the only currency in the world.
+This is a private friends server economy. The in-game currency's name is set by the server owner
+in config — **HD** ("Heist Dollar") is just this project's own default placeholder, not a
+requirement. Everything lives in a ledger, which is what keeps this inside Rockstar/FiveM's rules
+around crypto-related content.
 
 ## Status at a glance
 
@@ -36,7 +39,8 @@ This is a private friends server. No real-money entry/exit, no sale of HD, no ad
 
 ## Non-goals (v1)
 
-- No real-money on/off-ramp. HD is not redeemable for fiat.
+- Everything lives in a ledger, not a blockchain, token or crypto asset — that's what keeps this
+  inside Rockstar/FiveM's rules around crypto-related content.
 - No DEX, no AMM, no lending — closed economy.
 - No NFTs for items (vehicles, houses) in v1. Items live in the game DB. Maybe v2.
 - No anti-cheat hardening beyond what the engine can check itself — this is a trusted-friends server. (Note: without adapter authentication, anything that can call the engine can claim any actor. See ADR 0004.)
@@ -217,7 +221,9 @@ Money values are quoted decimal strings, never JSON numbers, and zero prices are
 
 ## Why this design works for the company conversations
 
-- **The off-chain mode is shippable in principle** without breaching FiveM's Creator Platform License Agreement — it is just a server-side economy database. No tokens, no crypto assets. *(In practice there is no adapter yet, so nothing is shippable to a server today.)*
+- **The ledger mode is shippable in principle** — it's a server-side ledger, not a blockchain,
+  token or crypto asset, which is what keeps it inside Rockstar/FiveM's rules around
+  crypto-related content. *(In practice there is no adapter yet, so nothing is shippable to a server today.)*
 - The on-chain backends are an **architectural option**, not a feature. The honest statement to Cfx.re is: "the ledger sits behind an interface that could take a Solana backend; we have not written one, custody blocks it, and we will not enable it unless you bless it."
 - **The intent layer is the actual innovation** — typed, auditable economic actions. Useful even without crypto.
 - If Cfx.re ever opens up to crypto (unlikely soon), a backend, custody and approval are needed first. It is a project, not a flag flip. If they don't, we still have an off-chain economy plugin.

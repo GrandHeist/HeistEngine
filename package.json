@@ -1,7 +1,7 @@
 {
   "name": "heist-engine",
   "version": "0.1.0",
-  "description": "Drop-in economy engine for GTA RP servers with a swappable ledger backend. Currency: HD (Heist Dollars).",
+  "description": "Drop-in economy engine for GTA RP servers with a swappable ledger backend and a server-configurable currency (default placeholder: HD).",
   "type": "module",
   "engines": {
     "node": ">=24"

@@ -1,5 +1,6 @@
-// Core domain types. Every amount in this system is a bigint of whole HD (Heist Dollars).
-// There are no floats anywhere in the money path, by design.
+// Core domain types. Every amount in this system is a bigint of whole units of the configured
+// currency (HD, "Heist Dollar," is just this project's own default placeholder name — the
+// server owner sets the real one in config). There are no floats anywhere in the money path, by design.
 
 export type WalletId = string;
 export type OwnerId = string;
