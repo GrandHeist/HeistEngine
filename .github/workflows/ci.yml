@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # A real Postgres, not a mock — same rule the conformance suite itself follows
+    # (ADR 0001). The suite skips the Postgres backend gracefully if nothing is
+    # reachable at TEST_DATABASE_URL, but on CI it should always be reachable, so
+    # a real run here genuinely exercises all three backends, never a silent skip.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: heist_engine_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/heist_engine_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - run: npm install
+
+      - name: typecheck + full test suite (memory, sqlite, and real postgres)
+        run: npm run check

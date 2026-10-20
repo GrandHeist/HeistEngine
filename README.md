@@ -1,5 +1,7 @@
 # Heist Engine
 
+[![CI](https://github.com/GrandHeist/HeistEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/GrandHeist/HeistEngine/actions/workflows/ci.yml)
+
 [@GTAHeistEngine](https://x.com/GTAHeistEngine)
 
 An economy engine for GTA RP servers built around a swappable ledger backend. Every economic action in
