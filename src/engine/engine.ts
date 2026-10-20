@@ -159,6 +159,12 @@ export class EconomyEngine {
           `A player wallet already uses the reserved entity id "${wallet.ownerId}"`,
         );
       }
+      // ADR 0003 part 3: with a master seed configured, every already-existing wallet's key
+      // must re-derive to its stored pubkey or the engine refuses to start. With no seed
+      // configured this is skipped entirely — unchanged from before this feature existed.
+      if (this.#custody.hasMasterSeed) {
+        this.#custody.reconcileExistingWallet(wallet.ownerId, wallet.pubkey);
+      }
     }
     for (const entity of this.#config.entities) {
       await this.#ensureWallet(entity.id, true);

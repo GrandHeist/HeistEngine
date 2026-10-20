@@ -21,7 +21,7 @@ The in-game currency is **HD** — Heist Dollars.
 | **Signed transactions** | *designed, not implemented.* Ledger rows are hash-chained but their `signature` column is empty. See [ADR 0003](docs/adr/0003-signing-design.md) |
 | **Adapter authentication**, HTTP/WS server | *not written.* The engine is a library; only the CLI drives it |
 | **FiveM** (Lua) and **RageMP** (JS) adapters | *not written* |
-| Persistent custody keys | *not written.* Keys live in process memory and are lost on restart |
+| Persistent custody keys | **library-level, not yet wired to the CLI.** HKDF-derived per-wallet keys from one master seed (ADR 0003 part 3) — `Custody` derives and reconciles, `EconomyEngine.init()` enforces a restart reproduces every key or refuses to start. No `--master-seed-path` flag on `npm run sim` yet |
 
 So the honest pitch today: a tested, off-chain economy ledger you can drive from a CLI. Its transaction history is hash-chained, so edits to it are detectable; it is not yet tamper-proof (no signatures, and the wallet registry is not covered: see ADR 0006).
 Everything else in the spec is design.

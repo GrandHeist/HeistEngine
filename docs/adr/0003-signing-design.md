@@ -1,8 +1,10 @@
 # ADR 0003 — Signing ledger rows, authenticating adapters, persisting custody keys
 
 Date: 2026-09-24
-Status: **Proposed. Nothing in this ADR is implemented.** It needs a decision from the project owner
-(see the end) before any code is written.
+Status: **Decided 2026-10-20 — all four questions answered (see the end). Part 3 (custody
+persistence) is implemented: `src/engine/masterSeed.ts`, `Custody` constructor option
+`masterSeed`, `Custody.reconcileExistingWallet`, wired into `EconomyEngine.init()`. Parts 1 and 2
+(signing, adapter auth/HTTP) are still not implemented — next per the rollout order below.**
 
 ## Context
 
@@ -231,10 +233,12 @@ Each step is independently testable and none touches the on-chain guard.
   authenticity, not with where it is stored.
 - The design assumes **one engine process per ledger** (ADR 0005).
 
-## Decision needed from the project owner
+## Decision from the project owner (2026-10-20)
 
-1. Part 1: accept **option A** (sync signer) now, with B as the later upgrade?
-2. Part 2: accept the **HMAC envelope** with per-adapter scopes? Is a server-side JS shim for the Lua
-   resource acceptable?
-3. Part 3: accept **option 1** (HKDF from a master seed)? Where should the seed live on the server?
-4. Should the ledger require signatures from seq 0 (recommended, no released data) or carry a cut-over?
+1. Part 1: **option A** (sync signer) accepted, B reserved as the later upgrade. Not yet implemented.
+2. Part 2: **HMAC envelope** with per-adapter scopes accepted, including a server-side JS shim for
+   the Lua resource since Lua has no built-in HMAC. Not yet implemented. The Lua-crypto question
+   this ADR flagged as unverified still needs checking against a real FiveM server once one exists.
+3. Part 3: **option 1** (HKDF from a master seed) accepted. Seed file lives `chmod 600`, outside
+   the repo, same convention as this machine's other secrets. **Implemented** — see `src/engine/masterSeed.ts`.
+4. Signatures will require seq 0 (recommended) once Part 1 lands — no released data exists yet.

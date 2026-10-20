@@ -3,6 +3,7 @@
 // src/engine/custody.ts fails loudly instead of quietly enabling real
 // private-key custody. See the header block of that file before touching this.
 
+import { randomBytes } from 'node:crypto';
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -180,6 +181,82 @@ describe('Custody — keys and signing', () => {
     assert.equal(custody.has('alice'), false);
     // ...and the owner can be re-keyed afterwards.
     assert.doesNotThrow(() => custody.createKeypair('alice'));
+  });
+});
+
+describe('Custody — master seed (ADR 0003 part 3)', () => {
+  test('with no seed, hasMasterSeed is false and keys stay random across instances', () => {
+    const custody = new Custody('memory');
+    assert.equal(custody.hasMasterSeed, false);
+    const a = custody.createKeypair('alice');
+    const b = new Custody('memory').createKeypair('alice');
+    assert.notEqual(a.pubkey, b.pubkey, 'random generation must not accidentally collide or be deterministic');
+  });
+
+  test('with a seed, the same owner derives the identical key on a fresh instance', () => {
+    const seed = randomBytes(32);
+    const first = new Custody('memory', { masterSeed: seed });
+    const a1 = first.createKeypair('alice');
+
+    const second = new Custody('memory', { masterSeed: seed });
+    assert.equal(second.hasMasterSeed, true);
+    assert.equal(second.reconcileExistingWallet('alice', a1.pubkey), undefined);
+    assert.equal(second.pubkeyOf('alice'), a1.pubkey);
+    assert.equal(second.addressOf('alice'), a1.address);
+  });
+
+  test('with a seed, different owners derive different keys', () => {
+    const custody = new Custody('memory', { masterSeed: randomBytes(32) });
+    const alice = custody.createKeypair('alice');
+    const bob = custody.createKeypair('bob');
+    assert.notEqual(alice.pubkey, bob.pubkey);
+  });
+
+  test('with a seed, a different epoch for the same owner derives a different key', () => {
+    const seed = randomBytes(32);
+    const epoch0 = new Custody('memory', { masterSeed: seed }).createKeypair('alice');
+
+    // reconcileExistingWallet derives at the given epoch and compares; asking it to match
+    // epoch 0's pubkey while reconciling at epoch 1 must mismatch if epochs truly differ.
+    throwsWithCode(
+      () => new Custody('memory', { masterSeed: seed }).reconcileExistingWallet('alice', epoch0.pubkey, 1),
+      'CUSTODY_KEY_MISMATCH',
+    );
+  });
+
+  test('reconcileExistingWallet with the wrong seed refuses with CUSTODY_KEY_MISMATCH', () => {
+    const original = new Custody('memory', { masterSeed: randomBytes(32) }).createKeypair('alice');
+    const wrongSeedCustody = new Custody('memory', { masterSeed: randomBytes(32) });
+
+    throwsWithCode(() => wrongSeedCustody.reconcileExistingWallet('alice', original.pubkey), 'CUSTODY_KEY_MISMATCH');
+  });
+
+  test('reconcileExistingWallet with no seed configured refuses with MASTER_SEED_MISSING', () => {
+    const original = new Custody('memory', { masterSeed: randomBytes(32) }).createKeypair('alice');
+    const noSeedCustody = new Custody('memory');
+
+    throwsWithCode(() => noSeedCustody.reconcileExistingWallet('alice', original.pubkey), 'MASTER_SEED_MISSING');
+  });
+
+  test('reconcileExistingWallet is a no-op if the owner is already loaded', () => {
+    const custody = new Custody('memory', { masterSeed: randomBytes(32) });
+    const alice = custody.createKeypair('alice');
+    // A mismatched expected pubkey here would throw if it actually re-derived; it must not,
+    // because the key is already loaded from createKeypair above.
+    assert.doesNotThrow(() => custody.reconcileExistingWallet('alice', 'not-even-hex'));
+    assert.equal(custody.pubkeyOf('alice'), alice.pubkey);
+  });
+
+  test('constructing with a wrong-length seed is refused', () => {
+    throwsWithCode(() => new Custody('memory', { masterSeed: Buffer.from('tooshort') }), 'MASTER_SEED_INVALID');
+  });
+
+  test('derived keys still sign and verify like random ones', () => {
+    const custody = new Custody('memory', { masterSeed: randomBytes(32) });
+    const keypair = custody.createKeypair('alice');
+    const payload = 'kind="transfer"';
+    const signature = custody.sign('alice', payload);
+    assert.equal(custody.verify(keypair.pubkey, payload, signature), true);
   });
 });
 

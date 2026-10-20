@@ -50,6 +50,7 @@ import type { KeyObject } from 'node:crypto';
 import { EngineError } from '../errors.ts';
 import type { BackendName } from '../ledger/backend.ts';
 import type { OwnerId } from '../types.ts';
+import { DEFAULT_EPOCH, deriveWalletSeed } from './masterSeed.ts';
 
 /**
  * Asserted by tests: on-chain custody is intentionally unimplemented.
@@ -70,8 +71,19 @@ const ADDRESS_BODY_HEX_LEN = 40;
 /** DER prefix for an ed25519 SPKI public key. The raw 32-byte key follows it. */
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
+/**
+ * DER prefix for an ed25519 PKCS#8 private key (RFC 8410 appendix A). The raw
+ * 32-byte seed follows it. For ed25519 the "private key" IS the 32-byte seed —
+ * there is nothing else to derive it from, which is exactly why HKDF output
+ * can be imported directly as one.
+ */
+const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+
 /** Raw ed25519 public key size in bytes. */
 const ED25519_PUBKEY_BYTES = 32;
+
+/** Raw ed25519 private key seed size in bytes. */
+const ED25519_SEED_BYTES = 32;
 
 export interface Keypair {
   /** Raw ed25519 public key, hex. Matches Wallet.pubkey in types.ts. */
@@ -92,19 +104,30 @@ interface StoredKey {
   address: string;
 }
 
+/**
+ * v1 (this file, ADR 0003 part 3): a 32-byte secret, read once at process start
+ * (see masterSeed.ts), that every wallet's key derives from via HKDF. Nothing
+ * per-wallet is stored — a restart reproduces every key from the seed alone.
+ * v2 (TODO): encrypted-at-rest per-wallet store, or MPC — see the header block.
+ */
+export interface CustodyOptions {
+  masterSeed?: Buffer;
+}
+
 export class Custody {
   readonly backend: BackendName;
+  readonly #masterSeed: Buffer | undefined;
 
   /**
-   * TODO(v1): replace with an encrypted-at-rest KV store (private keys
-   * encrypted under a server master key from env/KMS, never plaintext on disk).
+   * Process-local cache of loaded keys. With a master seed configured, a key
+   * in here was either just derived (createKeypair, a new wallet) or
+   * reconciled against the ledger's stored pubkey (reconcileExistingWallet,
+   * a restart) — never stored anywhere itself.
    * TODO(v2): replace with an MPC threshold signer; `sign` becomes async.
-   * Until then keys are process-local and vanish on restart, which is why only
-   * the off-chain backends are permitted above.
    */
   readonly #keys = new Map<OwnerId, StoredKey>();
 
-  constructor(backend: BackendName) {
+  constructor(backend: BackendName, options?: CustodyOptions) {
     if (isOnchain(backend)) {
       throw new EngineError(
         'ONCHAIN_CUSTODY_BLOCKED',
@@ -119,10 +142,34 @@ export class Custody {
       );
     }
     this.backend = backend;
+    if (options?.masterSeed !== undefined && options.masterSeed.length !== ED25519_SEED_BYTES) {
+      throw new EngineError(
+        'MASTER_SEED_INVALID',
+        `Master seed must be ${ED25519_SEED_BYTES} bytes, got ${options.masterSeed.length}`,
+      );
+    }
+    this.#masterSeed = options?.masterSeed;
   }
 
   /**
-   * Generate a fresh ed25519 keypair for an owner and remember it.
+   * True if this instance derives keys deterministically from a master seed
+   * (ADR 0003 part 3) instead of generating random ones. Callers use this to
+   * decide whether boot-time reconciliation (reconcileExistingWallet) applies
+   * at all — an instance with no seed configured behaves exactly as before
+   * this feature existed (random keys, lost on restart, no reconciliation).
+   */
+  get hasMasterSeed(): boolean {
+    return this.#masterSeed !== undefined;
+  }
+
+  /**
+   * Create a keypair for a NEW owner and remember it. With a master seed
+   * configured (ADR 0003 part 3), the key is derived deterministically — the
+   * same owner on a fresh process with the same seed gets the identical key,
+   * which is what lets a restart carry on signing for wallets it already
+   * created. With no seed configured, the key is random and lost on restart,
+   * exactly as before this feature existed (fine for the memory backend's
+   * tests and dry runs).
    * Unreachable in on-chain mode — the constructor throws before an instance
    * exists, so no on-chain key material is ever created.
    */
@@ -136,17 +183,50 @@ export class Custody {
       );
     }
 
-    const { publicKey, privateKey } = generateKeyPairSync('ed25519');
-    const pubkeyHex = rawPubkeyHex(publicKey);
-    const address = deriveAddress(pubkeyHex);
-
-    this.#keys.set(ownerId, { privateKey, pubkeyHex, address });
+    const stored =
+      this.#masterSeed === undefined
+        ? randomStoredKey()
+        : keypairFromSeed(deriveWalletSeed(this.#masterSeed, ownerId, DEFAULT_EPOCH));
+    this.#keys.set(ownerId, stored);
 
     return {
-      pubkey: pubkeyHex,
-      address,
-      privateKeyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+      pubkey: stored.pubkeyHex,
+      address: stored.address,
+      privateKeyPem: stored.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
     };
+  }
+
+  /**
+   * Boot-time reconciliation for a wallet that ALREADY exists in the ledger
+   * (ADR 0003 part 3): derive this owner's key from the master seed, and load
+   * it into the cache only if the derived pubkey matches what the ledger
+   * already has stored for it. A mismatch — or no master seed configured at
+   * all — is a startup failure, never a silent re-key: a wrong or missing key
+   * here means every future signature for this wallet would fail to verify
+   * against its already-stored pubkey.
+   * No-op if this owner's key is already loaded this process.
+   */
+  reconcileExistingWallet(ownerId: OwnerId, storedPubkeyHex: string, epoch: number = DEFAULT_EPOCH): void {
+    assertOwnerId(ownerId);
+    if (this.#keys.has(ownerId)) return;
+    if (this.#masterSeed === undefined) {
+      throw new EngineError(
+        'MASTER_SEED_MISSING',
+        `Owner "${ownerId}" already has a wallet in the ledger, but no master seed is configured, ` +
+          `so its signing key cannot be reproduced. Refusing to start — see ADR 0003 part 3.`,
+      );
+    }
+    const stored = keypairFromSeed(deriveWalletSeed(this.#masterSeed, ownerId, epoch));
+    if (stored.pubkeyHex !== storedPubkeyHex) {
+      throw new EngineError(
+        'CUSTODY_KEY_MISMATCH',
+        `Owner "${ownerId}"'s key, derived from the configured master seed at epoch ${epoch}, does not ` +
+          `match its pubkey already stored in the ledger. The seed may be wrong, or this wallet predates ` +
+          `the current seed/epoch. Refusing to start rather than sign with a key that will not verify — ` +
+          `see ADR 0003 part 3.`,
+      );
+    }
+    this.#keys.set(ownerId, stored);
   }
 
   /** True if this owner has a custodial key in this process. */
@@ -268,6 +348,35 @@ export function deriveAddress(pubkeyHex: string): string {
   }
   const digest = createHash('sha256').update(raw).digest('hex');
   return ADDRESS_PREFIX + digest.slice(0, ADDRESS_BODY_HEX_LEN);
+}
+
+/** A fresh random ed25519 keypair, wrapped as a StoredKey. The pre-seed-derivation default. */
+function randomStoredKey(): StoredKey {
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const pubkeyHex = rawPubkeyHex(publicKey);
+  return { privateKey, pubkeyHex, address: deriveAddress(pubkeyHex) };
+}
+
+/**
+ * Import a raw 32-byte ed25519 seed as a private key and wrap it as a
+ * StoredKey. For ed25519 the "private key" and the "seed" are the same 32
+ * bytes (RFC 8032) — this just wraps them in the PKCS#8 DER shape node's
+ * crypto module requires to import one, mirroring publicKeyFromHex below.
+ */
+function keypairFromSeed(seed: Buffer): StoredKey {
+  if (seed.length !== ED25519_SEED_BYTES) {
+    throw new EngineError(
+      'MASTER_SEED_INVALID',
+      `Expected a ${ED25519_SEED_BYTES}-byte ed25519 seed, got ${seed.length} bytes`,
+    );
+  }
+  const privateKey = createPrivateKey({
+    key: Buffer.concat([ED25519_PKCS8_PREFIX, seed]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  const pubkeyHex = rawPubkeyHex(createPublicKey(privateKey));
+  return { privateKey, pubkeyHex, address: deriveAddress(pubkeyHex) };
 }
 
 /** Rebuild a node KeyObject from a raw hex ed25519 public key. */

@@ -22,7 +22,7 @@ This is a private friends server. No real-money entry/exit, no sale of HD, no ad
 | Signed ledger rows (payer key signs each tx) | **[planned]**, designed in [ADR 0003](adr/0003-signing-design.md); `signature` is always null today |
 | Adapter authentication, HTTP/WS surface | **[planned]**, designed in ADR 0003; the engine is a library today |
 | FiveM / RageMP adapters | **[planned]**, not written |
-| Persistent custody keys | **[planned]**; keys live in process memory today |
+| Persistent custody keys | **[built, library-level]**; HKDF from a master seed, ADR 0003 part 3. Not yet wired into the CLI |
 | Admin dashboard | **[planned]** |
 
 ## Goals
@@ -31,7 +31,7 @@ This is a private friends server. No real-money entry/exit, no sale of HD, no ad
 - Ledger backend is a swappable adapter behind one interface. *(Proven for two backends by shared conformance and engine suites.)*
 - Every economic action is an auditable, append-only, hash-chained transaction. Nothing changes a balance except a transfer, mint, or burn. **[built]**
 - Every transaction is *signed* by a wallet key. **[planned]** — the hash chain detects edits to history, but without signatures someone who can write the database and recompute hashes can append forged rows. See ADR 0006 (what is and is not caught) and ADR 0003.
-- Server-custodial wallets — players never sign anything in-game. Zero friction. *(Custody generates and holds keys; persistence across restarts is not built.)*
+- Server-custodial wallets — players never sign anything in-game. Zero friction. *(Custody generates and holds keys; persistence across restarts is built via a master seed, ADR 0003 part 3.)*
 - Talking-point ready: when we meet Cfx.re / RageMP / Take-Two, we can demo the off-chain mode today. The on-chain modes are a **design option that needs its own work and sign-off**, not a switch: they need a backend, real key custody, an ADR and explicit human approval first.
 
 ## Non-goals (v1)
@@ -100,7 +100,7 @@ The adapter never touches balances directly. It only emits intents and renders t
 The brain. Owns:
 - **Intent router** **[built]** — validates each intent against the world rules (does the player have enough? Is the entity real? Is the price right? Is this an entity id pretending to be a player?). Intents run one at a time behind a mutex (ADR 0005).
 - **Pricing/rules** **[built]** — config-driven prices and entities, JSON (`heist.config.json`), validated at load. Not hot-reloadable yet.
-- **Custody** **[partly built]** — generates and holds ed25519 keys in process memory, refuses on-chain backends. Persistence (encrypted at rest, or derived from a master seed) is **[planned]**, options in ADR 0003. MPC is a v2 idea.
+- **Custody** **[built]** — generates and holds ed25519 keys, refuses on-chain backends. Persistence via HKDF from a master seed is **[built]** (ADR 0003 part 3; not yet wired into the CLI). Signing itself (part 1) and MPC (v2) remain **[planned]**.
 - **Settlement** **[built]** — produces a ledger operation and hands it to the backend, atomically with the nonce and key guards.
 
 Intent flow, as built:
@@ -236,7 +236,9 @@ Money values are quoted decimal strings, never JSON numbers, and zero prices are
 ## Build order
 
 1. ✅ Economy Engine + memory, SQLite and Postgres backends + standalone CLI adapter — the full economy works without any GTA server, with a real database option when SQLite stops being enough.
-2. Persistent custody keys, signed ledger rows, adapter authentication + HTTP surface (ADR 0003). Prerequisite for any real adapter. **Needs the project owner's sign-off on ADR 0003's open decisions first — see that ADR's own "Decision needed" section.**
+2. ✅ Persistent custody keys (ADR 0003 part 3, decided and built 2026-10-20). Next, in order: signed
+   ledger rows (part 1), then adapter authentication + HTTP surface (part 2) — both decided, neither
+   built yet. Prerequisite for any real adapter.
 3. FiveM Lua adapter — connect to a local FiveM dev server, port one interaction (bike rental).
 4. RageMP JS adapter — same interaction, different framework.
 5. Solana backend behind explicit approval — same intents, real SPL transfers.

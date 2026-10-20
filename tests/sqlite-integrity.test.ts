@@ -3,6 +3,7 @@
 // would. The point is not that tampering is impossible (it is not) but that verifyIntegrity
 // notices it, and that the schema itself refuses the accidental kind.
 
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -592,6 +593,49 @@ describe('SqliteBackend — close, reopen, continue', () => {
 
     const report = await backend.verifyIntegrity();
     assert.equal(report.ok, true, show(report));
+    await backend.close();
+  });
+
+  test('a restart with a master seed reproduces every wallet key; a wrong seed refuses to start', async () => {
+    const path = newPath();
+    const config = { ...defaultConfig(), backend: 'sqlite' as const, dbPath: path };
+    const seed = randomBytes(32);
+    const otherSeed = randomBytes(32);
+
+    let backend = new SqliteBackend(path);
+    let engine = new EconomyEngine({ backend, custody: new Custody('sqlite', { masterSeed: seed }), config });
+    await engine.init();
+    const open = await engine.submit({ type: 'OpenAccount', nonce: 'o1', actor: 'alice' });
+    assert.ok(open.ok);
+    await backend.close();
+
+    // "restart" with the SAME seed: every wallet (alice + every configured entity) reconciles.
+    backend = new SqliteBackend(path);
+    engine = new EconomyEngine({ backend, custody: new Custody('sqlite', { masterSeed: seed }), config });
+    await assert.doesNotReject(() => engine.init());
+    await backend.close();
+
+    // "restart" with a DIFFERENT seed: every derived key mismatches its stored pubkey.
+    backend = new SqliteBackend(path);
+    engine = new EconomyEngine({ backend, custody: new Custody('sqlite', { masterSeed: otherSeed }), config });
+    await assert.rejects(
+      () => engine.init(),
+      (error: unknown) => {
+        assert.ok(error instanceof EngineError);
+        assert.equal(error.code, 'CUSTODY_KEY_MISMATCH');
+        return true;
+      },
+    );
+    await backend.close();
+
+    // "restart" with NO seed configured at all is unaffected by this feature — hasMasterSeed
+    // is false, so reconciliation is skipped entirely (see the adjacent "keeps accounts" test
+    // above, which relies on exactly this for backends that never opted into signing).
+    // reconcileExistingWallet's OWN refusal when called with no seed is covered directly in
+    // tests/custody.test.ts; engine.init() simply never calls it in that case.
+    backend = new SqliteBackend(path);
+    engine = new EconomyEngine({ backend, custody: new Custody('sqlite'), config });
+    await assert.doesNotReject(() => engine.init());
     await backend.close();
   });
 });
