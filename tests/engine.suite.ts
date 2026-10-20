@@ -123,7 +123,7 @@ export function engineSuite(factory: BackendFactory): void {
     });
   });
 
-  describe(`EconomyEngine — happy paths for all 8 intents [${factory.label}]`, () => {
+  describe(`EconomyEngine — happy paths for all 12 intents [${factory.label}]`, () => {
     test('OpenAccount mints the welcome grant to a new player', async () => {
       const result = await openAccount('player-1');
       assert.equal(result.newBalance, WELCOME_GRANT);
@@ -302,6 +302,83 @@ export function engineSuite(factory: BackendFactory): void {
 
       const tx = await backend.getTx(result.txId);
       assert.ok(tx?.memo.detail?.includes(ADMIN));
+    });
+
+    test('DepositToSociety moves money from a player to any configured entity', async () => {
+      await openAccount('player-1');
+
+      const result = expectOk(
+        await engine.submit({
+          type: 'DepositToSociety',
+          nonce: nonce('deposit'),
+          actor: 'player-1',
+          entity: 'realty-office',
+          amount: '80',
+        }),
+      );
+
+      assert.equal(result.newBalance, WELCOME_GRANT - 80n);
+      assert.equal(await balanceOf('realty-office'), 80n);
+    });
+
+    test('RobEntity moves money from an entity to the actor when admin-authorized', async () => {
+      await openAccount('robber');
+      await fundEntity('gas-station-1', 1000n);
+
+      const result = expectOk(
+        await engine.submit({
+          type: 'RobEntity',
+          nonce: nonce('rob'),
+          actor: 'robber',
+          entity: 'gas-station-1',
+          amount: '300',
+          authorizedBy: ADMIN,
+        }),
+      );
+
+      assert.equal(result.newBalance, WELCOME_GRANT + 300n);
+      assert.equal(await balanceOf('gas-station-1'), 700n);
+    });
+
+    test('PlaceBet then SettleBet: a won bet pays out from the casino, once', async () => {
+      await openAccount('player-1');
+      await fundEntity('casino-house', 1000n);
+
+      const placed = expectOk(
+        await engine.submit({
+          type: 'PlaceBet',
+          nonce: nonce('bet'),
+          actor: 'player-1',
+          casino: 'casino-house',
+          amount: '50',
+        }),
+      );
+      assert.equal(placed.newBalance, WELCOME_GRANT - 50n);
+      assert.equal(await balanceOf('casino-house'), 1050n);
+
+      const settled = expectOk(
+        await engine.submit({
+          type: 'SettleBet',
+          nonce: nonce('settle'),
+          actor: 'player-1',
+          betId: placed.txId,
+          payout: '100',
+        }),
+      );
+      assert.equal(settled.newBalance, WELCOME_GRANT - 50n + 100n);
+      assert.equal(await balanceOf('casino-house'), 950n);
+
+      // A loss needs no SettleBet call at all — the wager already moved to the casino.
+      expectFail(
+        await engine.submit({
+          type: 'SettleBet',
+          nonce: nonce('settle-again'),
+          actor: 'player-1',
+          betId: placed.txId,
+          payout: '100',
+        }),
+        'BET_SETTLED',
+      );
     });
 
     test('the whole run leaves the ledger verifiably intact', async () => {
@@ -558,9 +635,9 @@ export function engineSuite(factory: BackendFactory): void {
     test('init refuses to start over a player wallet that sits on an entity id', async () => {
       const otherBackend = factory.create();
       await otherBackend.init();
-      const key = custody.createKeypair('casino-house');
-      await otherBackend.createWallet('casino-house', { pubkey: key.pubkey, address: key.address });
-      const config = { ...testConfig(), entities: [...testConfig().entities, { id: 'casino-house' }] };
+      const key = custody.createKeypair('pawn-shop');
+      await otherBackend.createWallet('pawn-shop', { pubkey: key.pubkey, address: key.address });
+      const config = { ...testConfig(), entities: [...testConfig().entities, { id: 'pawn-shop' }] };
       const clashing = new EconomyEngine({ backend: otherBackend, custody, config });
       await assert.rejects(clashing.init(), (e: unknown) => {
         assert.equal((e as { code?: string }).code, 'ENTITY_ID_CONFLICT');
@@ -773,6 +850,84 @@ export function engineSuite(factory: BackendFactory): void {
     });
   });
 
+  describe(`EconomyEngine — RobEntity authorization [${factory.label}]`, () => {
+    async function rob(authorizedBy: string, actor = 'robber'): Promise<EngineResponse> {
+      return await engine.submit({
+        type: 'RobEntity',
+        nonce: nonce('rob'),
+        actor,
+        entity: 'gas-station-1',
+        amount: '50',
+        authorizedBy,
+      });
+    }
+
+    test('unlike Theft, there is no victim-consent option — an entity cannot consent', async () => {
+      await openAccount('robber');
+      await fundEntity('gas-station-1', 1000n);
+
+      // Naming the entity itself, or the robber, is never authorization — only a configured admin.
+      expectFail(await rob('gas-station-1'), 'NOT_AUTHORIZED');
+      expectFail(await rob('robber'), 'NOT_AUTHORIZED');
+      expectFail(await rob('free-text-trust-me'), 'NOT_AUTHORIZED');
+      assert.equal(await balanceOf('gas-station-1'), 1000n);
+
+      expectOk(await rob(ADMIN));
+      assert.equal(await balanceOf('gas-station-1'), 950n);
+    });
+  });
+
+  describe(`EconomyEngine — only a real bet counts [${factory.label}]`, () => {
+    test('a PlaceBet-shaped payment to the wrong entity, or with the wrong intent, is not a bet', async () => {
+      await openAccount('player-1');
+      const player = await backend.getWalletByOwner('player-1');
+      const hospital = await backend.getWalletByOwner('hospital');
+      const casino = await backend.getWalletByOwner('casino-house');
+      assert.ok(player !== null && hospital !== null && casino !== null);
+      await fundEntity('casino-house', 1000n);
+
+      const wrongPayee = await backend.transfer(player.id, hospital.id, 10n, {
+        intent: 'PlaceBet',
+        nonce: nonce('a'),
+        meta: { casino: 'casino-house' },
+      });
+      const wrongIntent = await backend.transfer(player.id, casino.id, 10n, {
+        intent: 'BuyService',
+        nonce: nonce('b'),
+        meta: { casino: 'casino-house' },
+      });
+
+      for (const betId of [wrongPayee.txId, wrongIntent.txId, 'does-not-exist']) {
+        expectFail(
+          await engine.submit({ type: 'SettleBet', nonce: nonce('settle'), actor: 'player-1', betId, payout: '10' }),
+          'UNKNOWN_BET',
+        );
+      }
+    });
+
+    test('one player cannot settle another player\'s bet', async () => {
+      await openAccount('player-1');
+      await openAccount('player-2');
+      await fundEntity('casino-house', 1000n);
+
+      const placed = expectOk(
+        await engine.submit({ type: 'PlaceBet', nonce: nonce('bet'), actor: 'player-1', casino: 'casino-house', amount: '50' }),
+      );
+
+      expectFail(
+        await engine.submit({
+          type: 'SettleBet',
+          nonce: nonce('settle'),
+          actor: 'player-2',
+          betId: placed.txId,
+          payout: '100',
+        }),
+        'UNKNOWN_BET',
+      );
+      assert.equal(await balanceOf('player-2'), WELCOME_GRANT);
+    });
+  });
+
   describe(`EconomyEngine — admin funding [${factory.label}]`, () => {
     test('mints into an entity wallet so a fresh world can pay out', async () => {
       await openAccount('player-1');
@@ -825,6 +980,49 @@ export function engineSuite(factory: BackendFactory): void {
     });
   });
 
+  describe(`EconomyEngine — taxEntity [${factory.label}]`, () => {
+    test('moves money between two entities — the one operation with no player on either side', async () => {
+      await fundEntity('car-dealer', 1000n);
+      const result = expectOk(await engine.taxEntity('car-dealer', 'treasury', '150', nonce('tax')));
+      assert.equal(result.newBalance, 850n);
+      assert.equal(await balanceOf('treasury'), 150n);
+
+      const tx = await backend.getTx(result.txId);
+      assert.equal(tx?.kind, 'transfer');
+      assert.equal(tx?.memo.intent, 'TaxSociety');
+    });
+
+    test('is not an intent: submit cannot name it', async () => {
+      const response = await engine.submit({
+        type: 'TaxSociety',
+        nonce: nonce('x'),
+        actor: 'car-dealer',
+        toEntityId: 'treasury',
+        amount: '150',
+      } as unknown as Intent);
+      expectFail(response, 'INVALID_INTENT');
+    });
+
+    test('refuses a player on either side, an unknown entity, or taxing an entity against itself', async () => {
+      await openAccount('player-1');
+      expectFail(await engine.taxEntity('player-1', 'treasury', '10', nonce('tax')), 'UNKNOWN_ENTITY');
+      expectFail(await engine.taxEntity('treasury', 'player-1', '10', nonce('tax')), 'UNKNOWN_ENTITY');
+      expectFail(await engine.taxEntity('nobody', 'treasury', '10', nonce('tax')), 'UNKNOWN_ENTITY');
+      expectFail(await engine.taxEntity('treasury', 'treasury', '10', nonce('tax')), 'INVALID_INTENT');
+    });
+
+    test('is replay-protected (never taxes twice) and validates the amount', async () => {
+      await fundEntity('car-dealer', 1000n);
+      expectOk(await engine.taxEntity('car-dealer', 'treasury', '100', 'tax-once'));
+      expectOk(await engine.taxEntity('car-dealer', 'treasury', '100', 'tax-once')); // replay: original result
+      expectFail(await engine.taxEntity('car-dealer', 'hospital', '100', 'tax-once'), 'DUPLICATE_NONCE'); // reuse
+      for (const amount of ['0', '-5', '1.5', 'abc', '']) {
+        assert.equal((await engine.taxEntity('car-dealer', 'treasury', amount, nonce('tax'))).ok, false, amount);
+      }
+      assert.equal(await balanceOf('treasury'), 100n);
+    });
+  });
+
   describe(`EconomyEngine — replay protection [${factory.label}]`, () => {
     test('a replayed OpenAccount nonce returns the original result and does not double-grant', async () => {
       const first = expectOk(
@@ -844,15 +1042,18 @@ export function engineSuite(factory: BackendFactory): void {
       assert.equal((await backend.listWallets()).filter((w) => !w.isEntity).length, 1);
     });
 
-    test('a replayed Transfer, Payout and Theft each return their original tx once', async () => {
+    test('a replayed Transfer, Payout, Theft, DepositToSociety and RobEntity each return their original tx once', async () => {
       await openAccount('player-1');
       await openAccount('player-2');
       await engine.fundEntity('pd-payroll', '1000', nonce('fund'));
+      await engine.fundEntity('gas-station-1', '1000', nonce('fund2'));
 
       const intents: Intent[] = [
         { type: 'Transfer', nonce: 'r-xfer', actor: 'player-1', to: 'player-2', amount: '10' },
         { type: 'Payout', nonce: 'r-pay', actor: 'player-1', employer: 'pd-payroll', amount: '20' },
         { type: 'Theft', nonce: 'r-theft', actor: 'player-1', victim: 'player-2', amount: '30', authorizedBy: 'player-2' },
+        { type: 'DepositToSociety', nonce: 'r-deposit', actor: 'player-1', entity: 'realty-office', amount: '15' },
+        { type: 'RobEntity', nonce: 'r-rob', actor: 'player-1', entity: 'gas-station-1', amount: '25', authorizedBy: ADMIN },
       ];
       for (const intent of intents) {
         const first = expectOk(await engine.submit(intent));
@@ -860,8 +1061,22 @@ export function engineSuite(factory: BackendFactory): void {
         assert.equal(again.txId, first.txId, intent.type);
         assert.equal(again.replayed, true);
       }
-      assert.equal(await balanceOf('player-1'), WELCOME_GRANT - 10n + 20n + 30n);
+      assert.equal(await balanceOf('player-1'), WELCOME_GRANT - 10n + 20n + 30n - 15n + 25n);
       assert.equal(await balanceOf('player-2'), WELCOME_GRANT + 10n - 30n);
+    });
+
+    test('a replayed SettleBet returns the original payout once', async () => {
+      await openAccount('player-1');
+      await fundEntity('casino-house', 1000n);
+      const placed = expectOk(
+        await engine.submit({ type: 'PlaceBet', nonce: nonce('bet'), actor: 'player-1', casino: 'casino-house', amount: '50' }),
+      );
+      const intent: Intent = { type: 'SettleBet', nonce: 'r-settle', actor: 'player-1', betId: placed.txId, payout: '100' };
+      const first = expectOk(await engine.submit(intent));
+      const again = expectOk(await engine.submit(intent));
+      assert.equal(again.txId, first.txId);
+      assert.equal(again.replayed, true);
+      assert.equal(await balanceOf('player-1'), WELCOME_GRANT - 50n + 100n);
     });
 
     test('a replayed admin funding returns the original tx', async () => {

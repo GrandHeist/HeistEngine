@@ -46,6 +46,18 @@ export class RentalClosed extends EngineError {
   }
 }
 
+export class UnknownBet extends EngineError {
+  constructor(detail: string) {
+    super('UNKNOWN_BET', detail);
+  }
+}
+
+export class BetSettled extends EngineError {
+  constructor(betId: string) {
+    super('BET_SETTLED', `Bet ${betId} has already been settled`);
+  }
+}
+
 export class InvalidIntent extends EngineError {
   constructor(detail: string) {
     super('INVALID_INTENT', detail);

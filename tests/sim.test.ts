@@ -52,13 +52,13 @@ describe('sim — config wiring', () => {
     const path = configFile('custom.json', {
       ...defaultConfig(),
       welcomeGrant: '123',
-      entities: [...defaultConfig().entities, { id: 'casino-house', name: 'The House' }],
+      entities: [...defaultConfig().entities, { id: 'pawn-shop', name: 'Fast Cash Pawn' }],
     });
     const { code, out } = sim([`--config=${path}`], 'join zed\nwallets\nexit\n');
     assert.equal(code, 0, out);
-    assert.match(out, /welcome grant 123 HD, 7 entities/);
+    assert.match(out, new RegExp(`welcome grant 123 HD, ${defaultConfig().entities.length + 1} entities`));
     assert.match(out, /Account opened\. 123 HD welcome grant/);
-    assert.match(out, /casino-house\s+entity/);
+    assert.match(out, /pawn-shop\s+entity/);
   });
 
   test('a config that fails validation stops startup with exit 1 and says why', () => {

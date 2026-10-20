@@ -39,6 +39,8 @@ interface Run {
   backend: LedgerBackend;
   /** rental ids handed out, by index of the RentVehicle step that made them */
   rentals: string[];
+  /** bet ids handed out, by index of the PlaceBet step that made them */
+  bets: string[];
   minted: bigint;
 }
 
@@ -52,7 +54,7 @@ async function makeRun(backend: LedgerBackend): Promise<Run> {
     },
   });
   await engine.init();
-  return { engine, backend, rentals: [], minted: 0n };
+  return { engine, backend, rentals: [], bets: [], minted: 0n };
 }
 
 /** Same step index -> same intent, on both runs. Rental ids are looked up per run by ordinal. */
@@ -60,7 +62,7 @@ function stepIntent(random: () => number, step: number, run: Run): Intent | { fu
   const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T;
   const nonce = random() < 0.08 && step > 0 ? `n${Math.floor(random() * step)}` : `n${step}`; // sometimes a reused nonce
   const actor = pick(ACTORS);
-  const kind = Math.floor(random() * 10);
+  const kind = Math.floor(random() * 14);
   switch (kind) {
     case 0:
       return { type: 'OpenAccount', nonce, actor };
@@ -93,6 +95,29 @@ function stepIntent(random: () => number, step: number, run: Run): Intent | { fu
         amount: pick(AMOUNTS),
         authorizedBy: pick(['admin-1', 'nobody', pick(PLAYERS)]),
       };
+    case 8:
+      return { type: 'DepositToSociety', nonce, actor, entity: pick(ENTITIES), amount: pick(AMOUNTS) };
+    case 9:
+      return {
+        type: 'RobEntity',
+        nonce,
+        actor,
+        entity: pick(ENTITIES),
+        amount: pick(AMOUNTS),
+        authorizedBy: pick(['admin-1', 'nobody', pick(PLAYERS)]),
+      };
+    case 10:
+      return { type: 'PlaceBet', nonce, actor, casino: pick(ENTITIES), amount: pick(AMOUNTS) };
+    case 11: {
+      const betId = run.bets.length > 0 && random() < 0.9 ? Math.floor(random() * run.bets.length) : -1;
+      return {
+        type: 'SettleBet',
+        nonce,
+        actor,
+        betId: betId === -1 ? 'no-such-bet' : `#${betId}`, // resolved per run below
+        payout: pick(AMOUNTS),
+      };
+    }
     default:
       return { fund: [pick(ENTITIES), pick(AMOUNTS), nonce] };
   }
@@ -109,10 +134,14 @@ async function applyStep(run: Run, intent: ReturnType<typeof stepIntent>): Promi
   if (intent.type === 'ReturnVehicle' && intent.rentalId.startsWith('#')) {
     resolved = { ...intent, rentalId: run.rentals[Number(intent.rentalId.slice(1))] ?? 'missing' };
   }
+  if (intent.type === 'SettleBet' && intent.betId.startsWith('#')) {
+    resolved = { ...intent, betId: run.bets[Number(intent.betId.slice(1))] ?? 'missing' };
+  }
   const response = await run.engine.submit(resolved);
   if (response.ok && response.replayed !== true) {
     if (intent.type === 'OpenAccount') run.minted += 500n;
     if (intent.type === 'RentVehicle') run.rentals.push(response.txId);
+    if (intent.type === 'PlaceBet') run.bets.push(response.txId);
   }
   return response;
 }
@@ -186,6 +215,10 @@ describe('fuzz — memory and sqlite agree, and the ledger stays sound', () => {
       'Fine',
       'Transfer',
       'Theft',
+      'DepositToSociety',
+      'RobEntity',
+      'PlaceBet',
+      'SettleBet',
       'AdminFund',
     ]) {
       assert.ok((settled.get(kind) ?? 0) >= 5, `only ${settled.get(kind) ?? 0} settled ${kind} steps across all seeds`);

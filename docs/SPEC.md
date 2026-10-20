@@ -171,7 +171,10 @@ The economy has wallets that aren't players:
 | `hospital` | Receives medical fees. |
 | `gas-station-N` | One per gas station. |
 | `taxi-co`, `pd-payroll`, etc. | Job-based payouts. |
-| `casino-house` (later) | Gambling sink, if we add it. |
+| `pd-impound` | Vehicle impound release fees (via `BuyService`). |
+| `car-dealer` | Vehicle purchases (via `BuyService`). |
+| `realty-office` | Property purchases and rent (via `BuyService`/`DepositToSociety`). |
+| `casino-house` | Gambling sink — wagers in, payouts out (via `PlaceBet`/`SettleBet`). Same ledger currency throughout; nothing here ever moves money outside this ledger. |
 
 Entity wallets are owned by the server but each is a real, addressable ledger account, so you can see the full flow of money — e.g., "the hospital made 12,400 HD this week." Entity ids are **reserved**: a player intent can never name one as actor, recipient or victim. Entities start empty; an operator funds them with `EconomyEngine.fundEntity` (admin only, not an intent; the sim's `fund` command).
 
@@ -182,12 +185,19 @@ Entity wallets are owned by the server but each is a real, addressable ledger ac
 | `OpenAccount` | mint (treasury authority) | new player | first join; once per owner; welcome grant from config |
 | `RentVehicle` | player | `bike-rental-co` | NPC interaction; records `vehicle` and `minutes` in the tx |
 | `ReturnVehicle` | `bike-rental-co` | player | return by rental id; refund is `paid × unused / rented`; once per rental |
-| `BuyService` | player | service entity | hospital, gas, food |
-| `Payout` | employer entity | player | end-of-shift, job completion |
+| `BuyService` | player | service entity | hospital, gas, food, **and any fixed-price catalog item** — impound release, a vehicle, a property, rent, since these are all just a `services` config entry, not a new intent |
+| `Payout` | employer entity | player | end-of-shift, job completion, **or any entity paying a player an adapter-decided amount** — a chop-shop buying a stolen vehicle, an NPC drug buyer, recurring wages, are all just `Payout` with a different employer id and memo |
 | `Fine` | player | `treasury` | police action |
-| `Transfer` | player | player | direct send (`/pay 02 50`) |
+| `Transfer` | player | player | direct send (`/pay 02 50`), **or a peer-to-peer sale** — a player buying contraband from another player is `Transfer` with a different memo |
 | `Theft` | victim | robber | needs the victim's consent or a configured admin |
+| `DepositToSociety` | player | any configured entity | the generic "pay a business an adapter-decided amount" primitive — a society/government account deposit, rent paid on a timer, anything without a catalog price |
+| `RobEntity` | entity | robber | robbing a store/bank/ATM, not a player — unlike Theft, the source cannot consent, so this is **admin-authorized only** |
+| `PlaceBet` | player | casino entity | the wager |
+| `SettleBet` | casino entity | player | pays out a WON bet, referencing the `PlaceBet` txId; a loss needs no call at all |
 | *(not an intent)* `fundEntity` | mint | entity | operator only |
+| *(not an intent)* `taxEntity` | entity | entity | operator/scheduled job only — the one operation with no player on either side (e.g. periodic business-to-government tax) |
+
+**Deliberately not separate intents.** `WithdrawFromSociety`, `PayWage`, `SellStolenVehicle` and `SellContraband` (to an NPC) are mechanically identical to `Payout` — an entity paying a player an amount the adapter decides — so they reuse it with a different employer id and memo rather than duplicating the same code under a new name. `BuyVehicle`, `BuyProperty`, `ImpoundRelease` and `PayRent` (when the rent is a fixed amount) are `BuyService` catalog entries. A peer-to-peer contraband sale is `Transfer`. `SendInvoice`/`PayInvoice` (a bill that is recorded before it's paid) is NOT covered yet — it needs the backend to track an unpaid, not-yet-settled obligation, which none of the three ledger backends currently have a concept for. That is real new backend work, not just a new intent, and deserves its own pass rather than being forced in here.
 
 **What the engine cannot verify.** Until adapter authentication exists (ADR 0003), the engine takes the `actor` and any `authorizedBy` claim at the adapter's word. It checks that they are well-formed, that entities are not players, and that an authorizer is the victim or a configured admin. It cannot check that the adapter is telling the truth. ADR 0004 lists exactly what remains open.
 

@@ -81,7 +81,11 @@ export type IntentType =
   | 'Payout'
   | 'Fine'
   | 'Transfer'
-  | 'Theft';
+  | 'Theft'
+  | 'DepositToSociety'
+  | 'RobEntity'
+  | 'PlaceBet'
+  | 'SettleBet';
 
 export interface BaseIntent {
   type: IntentType;
@@ -134,6 +138,44 @@ export interface TheftIntent extends BaseIntent {
   /** Theft requires explicit authorization — consent or admin. */
   authorizedBy: string;
 }
+/**
+ * player -> any configured entity, an arbitrary amount. The generic primitive behind a
+ * business/government "society" account deposit, rent, a property purchase priced inline, etc. —
+ * anything that is "a player pays some business an amount" without a catalog price. A FIXED
+ * price (rent, a vehicle, a house) belongs in the `services` config catalog and uses BuyService
+ * instead; this exists for amounts the adapter decides at call time.
+ */
+export interface DepositToSocietyIntent extends BaseIntent {
+  type: 'DepositToSociety';
+  entity: OwnerId;
+  amount: string;
+}
+/**
+ * entity -> player (the robber). Unlike Theft, the source is an NPC/system account, which cannot
+ * consent — so `authorizedBy` must always name a configured admin, never the entity itself.
+ */
+export interface RobEntityIntent extends BaseIntent {
+  type: 'RobEntity';
+  entity: OwnerId;
+  amount: string;
+  authorizedBy: string;
+}
+/** player -> casino/gambling entity. The wager. Settled (if won) by a later SettleBet. */
+export interface PlaceBetIntent extends BaseIntent {
+  type: 'PlaceBet';
+  casino: OwnerId;
+  amount: string;
+}
+/**
+ * casino entity -> player, paying out a WON bet. `betId` is the `txId` PlaceBet returned. Only
+ * called on a win — a loss needs no further action, the wager already moved to the casino at
+ * PlaceBet time. Settled once per bet, same guarantee ReturnVehicle gives a rental.
+ */
+export interface SettleBetIntent extends BaseIntent {
+  type: 'SettleBet';
+  betId: TxId;
+  payout: string;
+}
 
 export type Intent =
   | OpenAccountIntent
@@ -143,7 +185,11 @@ export type Intent =
   | PayoutIntent
   | FineIntent
   | TransferIntent
-  | TheftIntent;
+  | TheftIntent
+  | DepositToSocietyIntent
+  | RobEntityIntent
+  | PlaceBetIntent
+  | SettleBetIntent;
 
 /** What the engine hands back to the adapter. The adapter renders this and nothing else. */
 export interface IntentResult {

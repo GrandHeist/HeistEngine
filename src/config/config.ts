@@ -186,6 +186,9 @@ export function defaultConfig(): HeistConfig {
     services: {
       hospital_full_heal: { entity: 'hospital', price: '200' },
       gas_per_liter: { entity: 'gas-station-1', price: '2' },
+      impound_release: { entity: 'pd-impound', price: '250' },
+      sedan_purchase: { entity: 'car-dealer', price: '15000' },
+      apartment_rent: { entity: 'realty-office', price: '100' },
     },
     prices: {
       bike_rental: '10',
@@ -202,6 +205,10 @@ export function defaultConfig(): HeistConfig {
       { id: 'gas-station-1', name: 'Xero Gas — Strawberry' },
       { id: 'taxi-co', name: 'Downtown Cab Co.' },
       { id: 'pd-payroll', name: 'LSPD Payroll' },
+      { id: 'pd-impound', name: 'Impound Lot' },
+      { id: 'car-dealer', name: 'Westside Motors' },
+      { id: 'realty-office', name: 'Skyline Realty' },
+      { id: 'casino-house', name: 'Golden Chip Casino' },
     ],
     admins: [],
   };

@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   AccountExists,
+  BetSettled,
   DuplicateKey,
   DuplicateNonce,
   EngineError,
@@ -29,6 +30,7 @@ import {
   LedgerCorrupt,
   NotAuthorized,
   RentalClosed,
+  UnknownBet,
   UnknownEntity,
   UnknownRental,
   UnknownWallet,
@@ -49,6 +51,7 @@ import type { Custody } from './custody.ts';
 import { Mutex } from './mutex.ts';
 import type {
   BuyServiceIntent,
+  DepositToSocietyIntent,
   EngineResponse,
   FineIntent,
   Intent,
@@ -57,8 +60,11 @@ import type {
   OpenAccountIntent,
   OwnerId,
   PayoutIntent,
+  PlaceBetIntent,
   RentVehicleIntent,
   ReturnVehicleIntent,
+  RobEntityIntent,
+  SettleBetIntent,
   TheftIntent,
   TransferIntent,
   Tx,
@@ -87,6 +93,8 @@ const PUBLIC_CODES: ReadonlySet<string> = new Set([
   'ACCOUNT_EXISTS',
   'UNKNOWN_RENTAL',
   'RENTAL_CLOSED',
+  'UNKNOWN_BET',
+  'BET_SETTLED',
 ]);
 
 /** For a replayed nonce: which side of the tx is the party that initiated that intent type. */
@@ -95,6 +103,8 @@ const INITIATOR_IS_RECIPIENT: ReadonlySet<string> = new Set([
   'ReturnVehicle',
   'Payout',
   'Theft',
+  'RobEntity',
+  'SettleBet',
 ]);
 
 /** Longest fine reason kept in a memo. */
@@ -207,6 +217,44 @@ export class EconomyEngine {
     });
   }
 
+  /**
+   * ADMIN ONLY — not an Intent and not reachable through `submit`. Moves money between two
+   * ENTITIES (e.g. a business paying periodic tax to the government treasury) — every other
+   * operation in this engine has a player on at least one side; this is the one exception, and
+   * it exists only because a server operator or a scheduled job calls it directly, same trust
+   * level as fundEntity. Replay-protected by `nonce` like any other write.
+   */
+  async taxEntity(fromEntityId: OwnerId, toEntityId: OwnerId, amount: string, nonce: string): Promise<EngineResponse> {
+    return await this.#guarded(async () => {
+      assertNonEmpty(nonce, 'nonce');
+      assertNonEmpty(fromEntityId, 'fromEntityId');
+      assertNonEmpty(toEntityId, 'toEntityId');
+      if (fromEntityId === toEntityId) {
+        throw new InvalidIntent('taxEntity: fromEntityId and toEntityId must differ');
+      }
+      const from = await this.#requireEntityWallet(fromEntityId);
+      const to = await this.#requireEntityWallet(toEntityId);
+      const prior = await this.#backend.getTxByNonce(nonce);
+      if (prior !== null) {
+        if (prior.memo.intent === 'TaxSociety' && prior.from === from.id && prior.to === to.id) {
+          return await this.#replayed(prior, from.id);
+        }
+        throw new DuplicateNonce(nonce);
+      }
+      const value = this.#intentAmount(amount, 'amount');
+      const ref = await this.#backend.transfer(from.id, to.id, value, {
+        intent: 'TaxSociety',
+        detail: `tax from ${this.#displayName(fromEntityId)} to ${this.#displayName(toEntityId)}`,
+        nonce,
+      });
+      return await this.#result(
+        ref,
+        from.id,
+        `Taxed ${this.#money(value)} from ${this.#displayName(fromEntityId)} to ${this.#displayName(toEntityId)}.`,
+      );
+    });
+  }
+
   /** Serialize, and turn every throw into a typed failure. */
   async #guarded(work: () => Promise<IntentResult>): Promise<EngineResponse> {
     try {
@@ -274,6 +322,14 @@ export class EconomyEngine {
         return await this.#transfer(intent);
       case 'Theft':
         return await this.#theft(intent);
+      case 'DepositToSociety':
+        return await this.#depositToSociety(intent);
+      case 'RobEntity':
+        return await this.#robEntity(intent);
+      case 'PlaceBet':
+        return await this.#placeBet(intent);
+      case 'SettleBet':
+        return await this.#settleBet(intent);
       default:
         throw new InvalidIntent(`Unknown intent type ${JSON.stringify(unknownType(intent))}`);
     }
@@ -535,6 +591,133 @@ export class EconomyEngine {
       ref,
       robber.id,
       `Took ${this.#money(amount)} from ${intent.victim}.`,
+    );
+  }
+
+  /**
+   * player -> any configured entity, an adapter-decided amount. The generic "pay a business"
+   * primitive — a society/government account deposit, rent, anything without a catalog price.
+   * A fixed price (a vehicle, a house, an impound fee) belongs in the `services` config and
+   * should use BuyService instead.
+   */
+  async #depositToSociety(intent: DepositToSocietyIntent): Promise<IntentResult> {
+    const amount = this.#intentAmount(intent.amount, 'amount');
+
+    const player = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const payee = await this.#requireEntityWallet(intent.entity);
+
+    const ref = await this.#backend.transfer(
+      player.id,
+      payee.id,
+      amount,
+      this.#memo(intent, `deposit to ${this.#displayName(intent.entity)}`),
+    );
+
+    return await this.#result(
+      ref,
+      player.id,
+      `Paid ${this.#money(amount)} to ${this.#displayName(intent.entity)}.`,
+    );
+  }
+
+  /**
+   * entity -> player (the robber). Unlike Theft, the source cannot consent — an NPC store, bank
+   * or ATM has no owner to ask — so authorizedBy must always be a configured admin.
+   */
+  async #robEntity(intent: RobEntityIntent): Promise<IntentResult> {
+    if (typeof intent.authorizedBy !== 'string' || intent.authorizedBy.trim() === '') {
+      throw new NotAuthorized('RobEntity requires authorizedBy — a configured admin id');
+    }
+    const authorizedBy = intent.authorizedBy.trim();
+    if (!this.#admins.has(authorizedBy)) {
+      throw new NotAuthorized(
+        `RobEntity must be authorized by a configured admin, not "${authorizedBy}" — an entity cannot consent`,
+      );
+    }
+    const amount = this.#intentAmount(intent.amount, 'amount');
+
+    const payer = await this.#requireEntityWallet(intent.entity);
+    const robber = await this.#requirePlayerWallet(intent.actor, 'actor');
+
+    const ref = await this.#backend.transfer(
+      payer.id,
+      robber.id,
+      amount,
+      this.#memo(intent, `robbed ${this.#displayName(intent.entity)}, authorized by ${authorizedBy}`),
+    );
+
+    return await this.#result(
+      ref,
+      robber.id,
+      `Took ${this.#money(amount)} from ${this.#displayName(intent.entity)}.`,
+    );
+  }
+
+  /**
+   * player -> casino/gambling entity: the wager. Settled, if won, by a later SettleBet.
+   * Same-ledger-currency chips only — nothing here ever moves money outside this ledger.
+   */
+  async #placeBet(intent: PlaceBetIntent): Promise<IntentResult> {
+    const amount = this.#intentAmount(intent.amount, 'amount');
+
+    const player = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const casino = await this.#requireEntityWallet(intent.casino);
+
+    const ref = await this.#backend.transfer(
+      player.id,
+      casino.id,
+      amount,
+      {
+        ...this.#memo(intent, `bet at ${this.#displayName(intent.casino)}`),
+        // The casino's OWNER id (not its wallet id) — SettleBet looks this up via
+        // #requireEntityWallet, which takes an OwnerId.
+        meta: { casino: intent.casino },
+      },
+    );
+
+    return await this.#result(
+      ref,
+      player.id,
+      `Wagered ${this.#money(amount)} at ${this.#displayName(intent.casino)}.`,
+    );
+  }
+
+  /**
+   * casino entity -> player, paying out a WON bet. `betId` is the PlaceBet `txId`. A loss needs
+   * no call at all — the wager already settled to the casino at PlaceBet time. Paid once per
+   * bet: the payout carries the key `settle:<betId>`, which the ledger accepts a single time.
+   */
+  async #settleBet(intent: SettleBetIntent): Promise<IntentResult> {
+    assertNonEmpty(intent.betId, 'betId');
+    const payout = this.#intentAmount(intent.payout, 'payout');
+
+    const player = await this.#requirePlayerWallet(intent.actor, 'actor');
+
+    const bet = requireBet(await this.#backend.getTx(intent.betId), player.id);
+    const casino = await this.#requireEntityWallet(bet.casino);
+    // The claimed casino (from meta) must be where the wager's money actually went — otherwise
+    // a PlaceBet-shaped row paid to entity A could be settled by naming a different entity B in
+    // this check alone, same class of gap requireRental already closes for rentals.
+    if (bet.to !== casino.id) {
+      throw new UnknownBet('No such bet for this player');
+    }
+
+    let ref;
+    try {
+      ref = await this.#backend.transfer(casino.id, player.id, payout, {
+        ...this.#memo(intent, `won at ${this.#displayName(bet.casino)}`),
+        key: `settle:${intent.betId}`,
+        meta: { bet: intent.betId },
+      });
+    } catch (cause) {
+      if (cause instanceof DuplicateKey) throw new BetSettled(intent.betId);
+      throw cause;
+    }
+
+    return await this.#result(
+      ref,
+      player.id,
+      `Won ${this.#money(payout)} at ${this.#displayName(bet.casino)}.`,
     );
   }
 
@@ -801,6 +984,30 @@ function requireRental(
     throw new UnknownRental('No such rental for this player');
   }
   return { rental, rentedMinutes: Number(minutes) };
+}
+
+/**
+ * The bet tx's claimed casino OWNER id (from its structured `meta`) and where its money actually
+ * went. Throws UnknownBet unless the tx really is a PlaceBet payment from this player, so one
+ * player cannot cite another's bet (or any non-bet tx) to collect a payout. The caller still must
+ * check `to` against the casino id's resolved wallet — this only validates the tx's shape, not
+ * that the claimed casino is who was actually paid (see the call site). The same message covers
+ * every mismatch: it must not reveal whether some other player's tx id exists.
+ */
+function requireBet(bet: Tx | null, playerWallet: WalletId): { casino: OwnerId; to: WalletId } {
+  const casino = bet?.memo.meta?.['casino'];
+  if (
+    bet === null ||
+    bet.kind !== 'transfer' ||
+    bet.memo.intent !== 'PlaceBet' ||
+    bet.from !== playerWallet ||
+    bet.to === null ||
+    typeof casino !== 'string' ||
+    casino === ''
+  ) {
+    throw new UnknownBet('No such bet for this player');
+  }
+  return { casino, to: bet.to };
 }
 
 /** Only reachable if an adapter sends a type outside the union. */
