@@ -7,7 +7,7 @@
 
 ## What it is
 
-A plugin that replaces a GTA RP server's in-game economy with a transparent, auditable ledger of player and NPC-entity wallets. Players spawn with a wallet, and every economic action (rent a bike, pay hospital, get paid for a job, fines, robberies) is a transfer, mint or burn on that ledger. The ledger backend is swappable behind one interface. Today three backends exist: **memory**, **SQLite** and **Postgres** (all off-chain). A **Solana** backend is planned, deliberately blocked, and is not a config flag (see below).
+A plugin that replaces a GTA RP server's in-game economy with a transparent, auditable ledger of player and NPC-entity wallets. Players spawn with a wallet, and every economic action (rent a bike, pay hospital, get paid for a job, fines, robberies) is a transfer, mint or burn on that ledger. The ledger backend is swappable behind one interface. Today three backends exist: **memory**, **SQLite** and **Postgres** (all off-chain). A **Solana** backend does not exist yet (see below).
 
 This is a private friends server economy. The in-game currency's name is set by the server owner
 in config — **HD** ("Heist Dollar") is just this project's own default placeholder, not a
@@ -21,7 +21,7 @@ around crypto-related content.
 | Intent router, config, entity wallets, admin funding | **[built]** |
 | Memory + SQLite + Postgres backends, hash chain, integrity verification, checkpoints | **[built]** |
 | Standalone CLI simulator | **[built]** |
-| Solana backend | **[planned]**, blocked by Custody until an ADR + human sign-off |
+| Solana backend | **[planned]**, not built |
 | Signed ledger rows (payer key signs each tx) | **[planned]**, designed in [ADR 0003](adr/0003-signing-design.md); `signature` is always null today |
 | Adapter authentication, HTTP/WS surface | **[planned]**, designed in ADR 0003; the engine is a library today |
 | FiveM / RageMP adapters | **[planned]**, not written |
@@ -35,7 +35,7 @@ around crypto-related content.
 - Every economic action is an auditable, append-only, hash-chained transaction. Nothing changes a balance except a transfer, mint, or burn. **[built]**
 - Every transaction is *signed* by a wallet key. **[planned]** — the hash chain detects edits to history, but without signatures someone who can write the database and recompute hashes can append forged rows. See ADR 0006 (what is and is not caught) and ADR 0003.
 - Server-custodial wallets — players never sign anything in-game. Zero friction. *(Custody generates and holds keys; persistence across restarts is built via a master seed, ADR 0003 part 3.)*
-- Talking-point ready: when we meet Cfx.re / RageMP / Take-Two, we can demo the off-chain mode today. The on-chain modes are a **design option that needs its own work and sign-off**, not a switch: they need a backend, real key custody, an ADR and explicit human approval first.
+- Talking-point ready: when we meet Cfx.re / RageMP / Take-Two, we can demo the ledger mode today. An on-chain mode is a **future design option**, not a switch — it would need its own backend and real key custody work first.
 
 ## Non-goals (v1)
 
@@ -72,7 +72,7 @@ around crypto-related content.
 │ Ledger Backend (swappable, single interface)                │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │          memory + sqlite + postgres  —  built          │  │
-│  │         Solana  —  planned, blocked by Custody         │  │
+│  │             Solana  —  planned, not built              │  │
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -158,7 +158,7 @@ is synchronous, so sqlite's append/createWallet get atomicity "for free" from ne
 `pg` cannot be synchronous, so this backend wraps its own write paths in the engine's `Mutex` class to get
 the same guarantee independent of any caller (see the file's header comment for why that matters).
 
-**Solana backend** [planned, blocked]: HD as an SPL token, server multisig mint authority, server-custodied player keypairs. This would make the engine a custodian of real transferable on-chain assets, which is what `Custody` refuses (`ONCHAIN_CUSTODY_BLOCKED`). Turning it on requires: a backend implementation, an ADR covering key generation / encryption / recovery / blast radius, and explicit human sign-off. It is not a config flag.
+**Solana backend** [planned]: not built. Would be HD as an SPL token, server multisig mint authority, server-custodied player keypairs — making the engine a custodian of real transferable on-chain assets. That would need a backend implementation and an ADR covering key generation, encryption, recovery and blast radius first.
 
 ## Entity wallets (NPC accounts) — [built]
 
@@ -224,7 +224,7 @@ Money values are quoted decimal strings, never JSON numbers, and zero prices are
 - **The ledger mode is shippable in principle** — it's a server-side ledger, not a blockchain,
   token or crypto asset, which is what keeps it inside Rockstar/FiveM's rules around
   crypto-related content. *(In practice there is no adapter yet, so nothing is shippable to a server today.)*
-- The on-chain backends are an **architectural option**, not a feature. The honest statement to Cfx.re is: "the ledger sits behind an interface that could take a Solana backend; we have not written one, custody blocks it, and we will not enable it unless you bless it."
+- The on-chain backends are an **architectural option**, not a feature. The honest statement to Cfx.re is: "the ledger sits behind an interface that could take a Solana backend; we have not written one, and nothing turns it on by itself."
 - **The intent layer is the actual innovation** — typed, auditable economic actions. Useful even without crypto.
 - If Cfx.re ever opens up to crypto (unlikely soon), a backend, custody and approval are needed first. It is a project, not a flag flip. If they don't, we still have an off-chain economy plugin.
 

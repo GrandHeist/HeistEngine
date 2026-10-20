@@ -21,7 +21,7 @@ which is what keeps this inside Rockstar/FiveM's rules around crypto-related con
 | **SQLite** ledger backend (`node:sqlite`, file-backed, hash-chained, tamper-checked) | **works** |
 | **Postgres** ledger backend (`pg`, schema-isolated, same conformance suite as the other two) | **works** |
 | Standalone CLI simulator (`npm run sim`) | **works** |
-| **Solana** backend | *not written, and gated on purpose.* Custody refuses on-chain modes until a human signs off (see `src/engine/custody.ts`) |
+| **Solana** backend | *not written.* Only the off-chain backends (memory, SQLite, Postgres) exist today |
 | **Signed transactions** | *designed, not implemented.* Ledger rows are hash-chained but their `signature` column is empty. See [ADR 0003](docs/adr/0003-signing-design.md) |
 | **Adapter authentication**, HTTP/WS server | *not written.* The engine is a library; only the CLI drives it |
 | **FiveM** (Lua) and **RageMP** (JS) adapters | *not written* |
