@@ -44,7 +44,7 @@ describe('sim — config wiring', () => {
     assert.equal(code, 0, out);
     assert.match(out, /backend memory/);
     assert.match(out, /Account opened\. 500 HD welcome grant/);
-    assert.match(out, /Paid 200 HD to Pillbox Medical/);
+    assert.match(out, /Paid 200 HD to Horizon General Hospital/);
     assert.match(out, /chain OK/);
   });
 
@@ -90,7 +90,7 @@ describe('sim — config wiring', () => {
     assert.equal(code, 0, out);
     assert.match(out, /backend postgres/);
     assert.match(out, /Account opened\. 500 HD welcome grant/);
-    assert.match(out, /Paid 200 HD to Pillbox Medical/);
+    assert.match(out, /Paid 200 HD to Horizon General Hospital/);
     assert.match(out, /chain OK/);
   });
 

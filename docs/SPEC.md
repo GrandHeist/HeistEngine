@@ -221,8 +221,8 @@ The real format is JSON (`heist.config.json`, validated at load; there is no YAM
   "entities": [
     { "id": "treasury", "name": "City Treasury" },
     { "id": "bike-rental-co", "name": "Crystal Bikes" },
-    { "id": "hospital", "name": "Pillbox Medical" },
-    { "id": "gas-station-1", "name": "Xero Gas — Strawberry" }
+    { "id": "hospital", "name": "Horizon General Hospital" },
+    { "id": "gas-station-1", "name": "Redline Fuel Co." }
   ]
 }
 ```
