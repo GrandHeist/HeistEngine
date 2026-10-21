@@ -65,6 +65,11 @@ export function engineSuite(factory: BackendFactory): void {
     return await backend.getBalance(wallet.id);
   }
 
+  /** Balance of a non-cash bucket wallet — 'cash' itself is just balanceOf(owner). */
+  async function bucketBalanceOf(owner: string, bucket: 'bank' | 'dirty'): Promise<bigint> {
+    return await balanceOf(`${owner}#${bucket}`);
+  }
+
   /** Puts money into an entity's wallet directly, so payouts/refunds have a source. */
   async function fundEntity(owner: string, amount: bigint): Promise<void> {
     const wallet = await backend.getWalletByOwner(owner);
@@ -1042,6 +1047,187 @@ export function engineSuite(factory: BackendFactory): void {
         assert.equal((await engine.taxEntity('car-dealer', 'treasury', amount, nonce('tax'))).ok, false, amount);
       }
       assert.equal(await balanceOf('treasury'), 100n);
+    });
+  });
+
+  describe(`EconomyEngine — wallet buckets and laundering [${factory.label}]`, () => {
+    function withBuckets(overrides: Partial<ReturnType<typeof testConfig>['walletBuckets']>): EconomyEngine {
+      const config = { ...testConfig(), walletBuckets: { ...testConfig().walletBuckets, ...overrides } };
+      return new EconomyEngine({ backend, custody, config });
+    }
+
+    test('a config default that is not cash lands money there, untouched in the base wallet', async () => {
+      await openAccount('player-1');
+      await fundEntity('hospital', 1000n);
+      const bankPayout = withBuckets({ payout: 'bank' });
+      await bankPayout.init();
+
+      const result = expectOk(
+        await bankPayout.submit({ type: 'Payout', nonce: nonce('pay'), actor: 'player-1', employer: 'hospital', amount: '75' }),
+      );
+      assert.equal(result.newBalance, 75n, 'reports the bucket that actually changed');
+      assert.equal(await balanceOf('player-1'), WELCOME_GRANT, 'cash untouched');
+      assert.equal(await bucketBalanceOf('player-1', 'bank'), 75n);
+    });
+
+    test('an intent-level bucket overrides the configured default', async () => {
+      await openAccount('player-1');
+      await fundEntity('hospital', 1000n);
+
+      expectOk(
+        await engine.submit({
+          type: 'Payout',
+          nonce: nonce('pay'),
+          actor: 'player-1',
+          employer: 'hospital',
+          amount: '40',
+          bucket: 'bank',
+        }),
+      );
+      assert.equal(await balanceOf('player-1'), WELCOME_GRANT, 'cash untouched — the override went to bank');
+      assert.equal(await bucketBalanceOf('player-1', 'bank'), 40n);
+    });
+
+    test('RentVehicle and ReturnVehicle round-trip through the same non-cash bucket', async () => {
+      await openAccount('player-1');
+      await fundEntity('hospital', 1000n);
+      const bankRental = withBuckets({ rental: 'bank' });
+      await bankRental.init();
+
+      // Seed player-1's bank bucket (it doesn't exist until first used) via a bank-bucket Payout.
+      await bankRental.submit({
+        type: 'Payout',
+        nonce: nonce('seed'),
+        actor: 'player-1',
+        employer: 'hospital',
+        amount: '100',
+        bucket: 'bank',
+      });
+
+      const rented = expectOk(
+        await bankRental.submit({ type: 'RentVehicle', nonce: nonce('rent'), actor: 'player-1', vehicle: 'bike', minutes: 30 }),
+      );
+      assert.equal(await balanceOf('player-1'), WELCOME_GRANT, 'cash untouched — paid from bank');
+      assert.equal(rented.newBalance, 70n, '100 seeded minus the 30 HD rental cost');
+      assert.equal(await bucketBalanceOf('player-1', 'bank'), 70n);
+
+      const returned = expectOk(
+        await bankRental.submit({
+          type: 'ReturnVehicle',
+          nonce: nonce('return'),
+          actor: 'player-1',
+          rentalId: rented.txId,
+          minutesUnused: 10,
+        }),
+      );
+      assert.equal(returned.newBalance, 80n, 'refund credited back to the SAME bank bucket, not cash');
+      assert.equal(await balanceOf('player-1'), WELCOME_GRANT, 'cash still untouched throughout');
+    });
+
+    test('PlaceBet and SettleBet pay winnings back into the bucket the wager came from', async () => {
+      await openAccount('player-1');
+      await fundEntity('casino-house', 1000n);
+      await fundEntity('hospital', 1000n);
+      const bankBet = withBuckets({ bet: 'bank' });
+      await bankBet.init();
+
+      // Seed player-1's bank bucket (it doesn't exist until first used) via a bank-bucket Payout.
+      await bankBet.submit({
+        type: 'Payout',
+        nonce: nonce('seed'),
+        actor: 'player-1',
+        employer: 'hospital',
+        amount: '50',
+        bucket: 'bank',
+      });
+
+      const placed = expectOk(
+        await bankBet.submit({ type: 'PlaceBet', nonce: nonce('bet'), actor: 'player-1', casino: 'casino-house', amount: '50' }),
+      );
+      assert.equal(await balanceOf('player-1'), WELCOME_GRANT, 'cash untouched — wagered from bank');
+
+      const settled = expectOk(
+        await bankBet.submit({ type: 'SettleBet', nonce: nonce('settle'), actor: 'player-1', betId: placed.txId, payout: '120' }),
+      );
+      assert.equal(settled.newBalance, 120n, 'the 50 seeded was wagered away; the 120 payout lands in bank');
+      assert.equal(await balanceOf('player-1'), WELCOME_GRANT, 'winnings never touched cash');
+    });
+
+    test('a replayed nonce for a non-cash-bucket operation returns the original result, not a duplicate error', async () => {
+      await openAccount('player-1');
+      await fundEntity('hospital', 1000n);
+      const bankPayout = withBuckets({ payout: 'bank' });
+      await bankPayout.init();
+
+      const first = expectOk(
+        await bankPayout.submit({ type: 'Payout', nonce: 'pay-once', actor: 'player-1', employer: 'hospital', amount: '75' }),
+      );
+      const replay = expectOk(
+        await bankPayout.submit({ type: 'Payout', nonce: 'pay-once', actor: 'player-1', employer: 'hospital', amount: '75' }),
+      );
+      assert.equal(replay.txId, first.txId);
+      assert.equal(replay.replayed, true);
+      assert.equal(await bucketBalanceOf('player-1', 'bank'), 75n, 'only paid once');
+    });
+
+    test('RobEntity proceeds land in dirty when configured, and LaunderMoney is the only way out', async () => {
+      await openAccount('player-1');
+      await fundEntity('gas-station-1', 1000n);
+      const dirtyRobbery = withBuckets({ robberyProceeds: 'dirty' });
+      await dirtyRobbery.init();
+
+      expectOk(
+        await dirtyRobbery.submit({
+          type: 'RobEntity',
+          nonce: nonce('rob'),
+          actor: 'player-1',
+          entity: 'gas-station-1',
+          amount: '200',
+          authorizedBy: ADMIN,
+        }),
+      );
+      assert.equal(await balanceOf('player-1'), WELCOME_GRANT, 'robbery proceeds never touch cash');
+      assert.equal(await bucketBalanceOf('player-1', 'dirty'), 200n);
+
+      const laundered = expectOk(
+        await dirtyRobbery.submit({ type: 'LaunderMoney', nonce: nonce('launder'), actor: 'player-1', amount: '200', toBucket: 'cash' }),
+      );
+      assert.equal(laundered.newBalance, WELCOME_GRANT + 180n, '200 minus the default 10% cut, added to cash');
+      assert.equal(await bucketBalanceOf('player-1', 'dirty'), 0n);
+      assert.equal(await balanceOf('treasury'), 20n, 'the cut went to the configured fee entity');
+    });
+
+    test('LaunderMoney refuses to launder into dirty, and refuses when the cut eats the whole amount', async () => {
+      await openAccount('player-1');
+
+      expectFail(
+        await engine.submit({
+          type: 'LaunderMoney',
+          nonce: nonce('launder'),
+          actor: 'player-1',
+          amount: '10',
+          toBucket: 'dirty' as unknown as 'cash',
+        }),
+        'INVALID_INTENT',
+      );
+
+      const allTaken = new EconomyEngine({
+        backend,
+        custody,
+        config: { ...testConfig(), laundering: { ...testConfig().laundering, cutPercent: '100' } },
+      });
+      await allTaken.init();
+      expectFail(
+        await allTaken.submit({ type: 'LaunderMoney', nonce: nonce('launder'), actor: 'player-1', amount: '10', toBucket: 'cash' }),
+        'INVALID_AMOUNT',
+      );
+    });
+
+    test('an actor id may not contain "#" — it is reserved for internal bucket wallet keys', async () => {
+      expectFail(
+        await engine.submit({ type: 'OpenAccount', nonce: nonce('open'), actor: 'player-1#bank' }),
+        'INVALID_INTENT',
+      );
     });
   });
 

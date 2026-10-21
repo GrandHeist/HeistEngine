@@ -36,13 +36,16 @@ import {
   UnknownWallet,
 } from '../errors.ts';
 import {
+  isWalletBucket,
   own,
   parseAmount,
   parseAmountText,
+  parsePercent,
   priceOf,
   rentalRateOf,
   serviceOf,
   TREASURY_ID,
+  WALLET_BUCKETS,
 } from '../config/config.ts';
 import type { HeistConfig } from '../config/config.ts';
 import type { LedgerBackend, WalletKeyInfo } from '../ledger/backend.ts';
@@ -56,6 +59,7 @@ import type {
   FineIntent,
   Intent,
   IntentResult,
+  LaunderMoneyIntent,
   Memo,
   OpenAccountIntent,
   OwnerId,
@@ -69,6 +73,7 @@ import type {
   TransferIntent,
   Tx,
   Wallet,
+  WalletBucket,
   WalletId,
 } from '../types.ts';
 
@@ -293,11 +298,18 @@ export class EconomyEngine {
     // the ORIGINAL result back so the adapter can carry on; any other reuse is a duplicate.
     const prior = await this.#backend.getTxByNonce(intent.nonce);
     if (prior !== null) {
-      const initiator = INITIATOR_IS_RECIPIENT.has(prior.memo.intent) ? prior.to : prior.from;
-      const actor =
-        typeof intent.actor === 'string' ? await this.#backend.getWalletByOwner(intent.actor) : null;
-      if (actor !== null && initiator === actor.id && prior.memo.intent === intent.type) {
-        return await this.#replayed(prior, actor.id);
+      // The wallet that moved is bucket-specific (e.g. "player-1#bank"'s id), not necessarily
+      // intent.actor's base/cash wallet, so match by stripping the bucket suffix back off its
+      // owner id rather than comparing wallet ids against the base wallet directly.
+      const initiatorId = INITIATOR_IS_RECIPIENT.has(prior.memo.intent) ? prior.to : prior.from;
+      const initiatorWallet = initiatorId !== null ? await this.#backend.getWallet(initiatorId) : null;
+      const matches =
+        typeof intent.actor === 'string' &&
+        initiatorWallet !== null &&
+        stripBucketSuffix(initiatorWallet.ownerId) === intent.actor &&
+        prior.memo.intent === intent.type;
+      if (matches && initiatorWallet !== null) {
+        return await this.#replayed(prior, initiatorWallet.id);
       }
       throw new DuplicateNonce(intent.nonce);
     }
@@ -327,6 +339,8 @@ export class EconomyEngine {
         return await this.#placeBet(intent);
       case 'SettleBet':
         return await this.#settleBet(intent);
+      case 'LaunderMoney':
+        return await this.#launderMoney(intent);
       default:
         throw new InvalidIntent(`Unknown intent type ${JSON.stringify(unknownType(intent))}`);
     }
@@ -360,10 +374,11 @@ export class EconomyEngine {
     };
     validateMemo(memo);
     const player = existing ?? (await this.#ensureWallet(intent.actor, false));
+    const grantWallet = await this.#bucketWallet(player, this.#config.walletBuckets.welcomeGrant);
 
     let ref;
     try {
-      ref = await this.#backend.mint(player.id, amount, memo);
+      ref = await this.#backend.mint(grantWallet.id, amount, memo);
     } catch (cause) {
       if (cause instanceof DuplicateKey) throw new AccountExists(intent.actor, player.address);
       throw cause;
@@ -371,12 +386,12 @@ export class EconomyEngine {
 
     return await this.#result(
       ref,
-      player.id,
+      grantWallet.id,
       `Account opened. ${this.#money(amount)} welcome grant received.`,
     );
   }
 
-  /** player -> bike-rental-co, rate * minutes (or the flat fee). */
+  /** player's rental bucket -> bike-rental-co, rate * minutes (or the flat fee). */
   async #rentVehicle(intent: RentVehicleIntent): Promise<IntentResult> {
     assertName(intent.vehicle, 'vehicle');
     const minutes = requireWholeCount(intent.minutes, 'minutes');
@@ -384,7 +399,9 @@ export class EconomyEngine {
     const amount = this.#rentalCost(intent.vehicle, minutes);
     requirePositive(amount, 'rental cost');
 
-    const player = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.rental);
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const player = await this.#bucketWallet(basePlayer, bucket);
     const payee = await this.#requireEntityWallet(this.#config.rentalEntity);
 
     const ref = await this.#backend.transfer(
@@ -394,7 +411,7 @@ export class EconomyEngine {
       {
         ...this.#memo(intent, `${intent.vehicle} — ${minutes}min`),
         // The rental record: ReturnVehicle reads these, never the detail text.
-        meta: { vehicle: intent.vehicle, minutes: String(minutes) },
+        meta: { vehicle: intent.vehicle, minutes: String(minutes), bucket },
       },
     );
 
@@ -417,14 +434,14 @@ export class EconomyEngine {
     assertNonEmpty(intent.rentalId, 'rentalId');
     const minutesUnused = requireWholeCount(intent.minutesUnused, 'minutesUnused');
 
-    const player = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
     const payer = await this.#requireEntityWallet(this.#config.rentalEntity);
 
-    const { rental, rentedMinutes } = requireRental(
-      await this.#backend.getTx(intent.rentalId),
-      player.id,
-      payer.id,
-    );
+    const rawRental = await this.#backend.getTx(intent.rentalId);
+    const bucket = requireRentalBucket(rawRental);
+    const player = await this.#bucketWallet(basePlayer, bucket);
+
+    const { rental, rentedMinutes } = requireRental(rawRental, player.id, payer.id);
     if (minutesUnused > rentedMinutes) {
       throw new InvalidIntent(
         `minutesUnused (${minutesUnused}) exceeds the ${rentedMinutes} minutes rented`,
@@ -465,7 +482,9 @@ export class EconomyEngine {
     const amount = service.price * BigInt(units);
     requirePositive(amount, 'price');
 
-    const player = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.buyService);
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const player = await this.#bucketWallet(basePlayer, bucket);
     const payee = await this.#requireEntityWallet(entityId);
 
     const ref = await this.#backend.transfer(
@@ -488,7 +507,9 @@ export class EconomyEngine {
     const amount = this.#intentAmount(intent.amount, 'amount');
 
     const employer = await this.#requireEntityWallet(intent.employer);
-    const player = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.payout);
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const player = await this.#bucketWallet(basePlayer, bucket);
 
     const ref = await this.#backend.transfer(
       employer.id,
@@ -508,7 +529,9 @@ export class EconomyEngine {
   async #fine(intent: FineIntent): Promise<IntentResult> {
     const amount = this.#intentAmount(intent.amount, 'amount');
 
-    const player = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.fine);
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const player = await this.#bucketWallet(basePlayer, bucket);
     const treasury = await this.#requireEntityWallet(TREASURY_ID);
 
     const reason = cleanReason(intent.reason);
@@ -535,9 +558,12 @@ export class EconomyEngine {
       throw new InvalidIntent('Cannot transfer to yourself');
     }
     const amount = this.#intentAmount(intent.amount, 'amount');
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.transfer);
 
-    const from = await this.#requirePlayerWallet(intent.actor, 'actor');
-    const to = await this.#requirePlayerWallet(intent.to, 'to');
+    const baseFrom = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const baseTo = await this.#requirePlayerWallet(intent.to, 'to');
+    const from = await this.#bucketWallet(baseFrom, bucket);
+    const to = await this.#bucketWallet(baseTo, bucket);
 
     const ref = await this.#backend.transfer(
       from.id,
@@ -573,9 +599,12 @@ export class EconomyEngine {
       );
     }
     const amount = this.#intentAmount(intent.amount, 'amount');
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.theft);
 
-    const victim = await this.#requirePlayerWallet(intent.victim, 'victim');
-    const robber = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const baseVictim = await this.#requirePlayerWallet(intent.victim, 'victim');
+    const baseRobber = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const victim = await this.#bucketWallet(baseVictim, bucket);
+    const robber = await this.#bucketWallet(baseRobber, bucket);
 
     const ref = await this.#backend.transfer(
       victim.id,
@@ -599,8 +628,10 @@ export class EconomyEngine {
    */
   async #depositToSociety(intent: DepositToSocietyIntent): Promise<IntentResult> {
     const amount = this.#intentAmount(intent.amount, 'amount');
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.depositToSociety);
 
-    const player = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const player = await this.#bucketWallet(basePlayer, bucket);
     const payee = await this.#requireEntityWallet(intent.entity);
 
     const ref = await this.#backend.transfer(
@@ -632,9 +663,11 @@ export class EconomyEngine {
       );
     }
     const amount = this.#intentAmount(intent.amount, 'amount');
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.robberyProceeds);
 
     const payer = await this.#requireEntityWallet(intent.entity);
-    const robber = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const baseRobber = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const robber = await this.#bucketWallet(baseRobber, bucket);
 
     const ref = await this.#backend.transfer(
       payer.id,
@@ -656,8 +689,10 @@ export class EconomyEngine {
    */
   async #placeBet(intent: PlaceBetIntent): Promise<IntentResult> {
     const amount = this.#intentAmount(intent.amount, 'amount');
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.bet);
 
-    const player = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const player = await this.#bucketWallet(basePlayer, bucket);
     const casino = await this.#requireEntityWallet(intent.casino);
 
     const ref = await this.#backend.transfer(
@@ -667,8 +702,9 @@ export class EconomyEngine {
       {
         ...this.#memo(intent, `bet at ${this.#displayName(intent.casino)}`),
         // The casino's OWNER id (not its wallet id) — SettleBet looks this up via
-        // #requireEntityWallet, which takes an OwnerId.
-        meta: { casino: intent.casino },
+        // #requireEntityWallet, which takes an OwnerId. `bucket` lets SettleBet pay
+        // winnings back into the SAME bucket the wager came from.
+        meta: { casino: intent.casino, bucket },
       },
     );
 
@@ -688,9 +724,13 @@ export class EconomyEngine {
     assertNonEmpty(intent.betId, 'betId');
     const payout = this.#intentAmount(intent.payout, 'payout');
 
-    const player = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
 
-    const bet = requireBet(await this.#backend.getTx(intent.betId), player.id);
+    const rawBet = await this.#backend.getTx(intent.betId);
+    const bucket = requireBetBucket(rawBet);
+    const player = await this.#bucketWallet(basePlayer, bucket);
+
+    const bet = requireBet(rawBet, player.id);
     const casino = await this.#requireEntityWallet(bet.casino);
     // The claimed casino (from meta) must be where the wager's money actually went — otherwise
     // a PlaceBet-shaped row paid to entity A could be settled by naming a different entity B in
@@ -718,6 +758,56 @@ export class EconomyEngine {
     );
   }
 
+  /**
+   * player's dirty bucket -> the player's own chosen clean bucket, minus a cut to
+   * `laundering.feeEntity`. The only path dirty money has back to being spendable.
+   *
+   * Two ledger writes, not one — a transfer only ever moves money between exactly two
+   * wallets, and this moves it to two destinations (the player's clean bucket, and the fee
+   * entity). Both run inside this engine's single intent-at-a-time lock, so nothing else can
+   * observe a half-done state; the only way to see one is a process crash between the two
+   * writes. If that happens, every HD is still visibly sitting in some real wallet (nothing
+   * is burned or created) — just not yet moved to its second destination. No automatic
+   * resumption: the top-level nonce replay guard answers an identical retry with the
+   * already-settled result rather than re-entering this handler, so a stuck fee leg needs an
+   * operator to notice (e.g. via verifyIntegrity) and move it manually. Documented, not solved.
+   */
+  async #launderMoney(intent: LaunderMoneyIntent): Promise<IntentResult> {
+    if (intent.toBucket !== 'cash' && intent.toBucket !== 'bank') {
+      throw new InvalidIntent(`toBucket must be "cash" or "bank", got ${JSON.stringify(intent.toBucket)}`);
+    }
+    const amount = this.#intentAmount(intent.amount, 'amount');
+
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const dirty = await this.#bucketWallet(basePlayer, 'dirty');
+    const clean = await this.#bucketWallet(basePlayer, intent.toBucket);
+    const feeEntity = await this.#requireEntityWallet(this.#config.laundering.feeEntity);
+
+    const cutPercent = parsePercent(this.#config.laundering.cutPercent, 'laundering.cutPercent');
+    const fee = (amount * cutPercent) / 100n;
+    const net = amount - fee;
+    requirePositive(net, 'amount after the laundering cut');
+
+    const ref = await this.#backend.transfer(dirty.id, clean.id, net, {
+      ...this.#memo(intent, `laundered into ${intent.toBucket}`),
+      meta: { toBucket: intent.toBucket, fee: fee.toString() },
+    });
+
+    if (fee > 0n) {
+      await this.#backend.transfer(dirty.id, feeEntity.id, fee, {
+        intent: intent.type,
+        nonce: `${intent.nonce}:fee`,
+        detail: `laundering fee to ${this.#displayName(this.#config.laundering.feeEntity)}`,
+      });
+    }
+
+    return await this.#result(
+      ref,
+      clean.id,
+      `Laundered ${this.#money(net)} into ${intent.toBucket} (${this.#money(fee)} fee).`,
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Pricing
   // -------------------------------------------------------------------------
@@ -737,6 +827,27 @@ export class EconomyEngine {
   // -------------------------------------------------------------------------
   // Wallets, memos, results
   // -------------------------------------------------------------------------
+
+  /** The intent's own override if present, else the configured default for this operation. */
+  #resolveBucket(explicit: WalletBucket | undefined, configured: WalletBucket): WalletBucket {
+    if (explicit === undefined) return configured;
+    if (!isWalletBucket(explicit)) {
+      throw new InvalidIntent(`bucket must be one of ${WALLET_BUCKETS.join(' | ')}, got ${JSON.stringify(explicit)}`);
+    }
+    return explicit;
+  }
+
+  /**
+   * The wallet for one money bucket of a player who already has a cash-bucket account (the
+   * wallet OpenAccount created). 'cash' IS that same wallet, unsuffixed — exactly the original
+   * single-balance design, so a server using only 'cash' everywhere never creates another
+   * wallet at all. 'bank'/'dirty' are separate ledger wallets (owner id `${base}#bucket`),
+   * created lazily on first use, each with its own address and keypair.
+   */
+  async #bucketWallet(player: Wallet, bucket: WalletBucket): Promise<Wallet> {
+    if (bucket === 'cash') return player;
+    return await this.#ensureWallet(`${player.ownerId}#${bucket}`, false);
+  }
 
   /** Create the wallet if absent, minting the keypair through Custody first. */
   async #ensureWallet(ownerId: OwnerId, isEntity: boolean): Promise<Wallet> {
@@ -877,10 +988,13 @@ function assertOwnerId(value: unknown, field: string): void {
     CONTROL_CHARS.test(value) ||
     /\p{Cf}/u.test(value) || // zero-width and other invisible format characters
     !value.isWellFormed() ||
-    value !== value.normalize('NFC') // "café" typed two ways is one id, not two grants
+    value !== value.normalize('NFC') || // "café" typed two ways is one id, not two grants
+    // '#' is reserved for internal bucket wallet keys (`${ownerId}#bank`). Without this, an
+    // adapter submitting actor "player-1#bank" would collide with player-1's OWN bank wallet.
+    value.includes('#')
   ) {
     throw new InvalidIntent(
-      `${field} must be a 1-128 character NFC-normalized id with no padding, control or invisible characters`,
+      `${field} must be a 1-128 character NFC-normalized id with no padding, control, invisible or "#" characters`,
     );
   }
 }
@@ -955,6 +1069,37 @@ function requireWholeCount(value: number, field: string): number {
     throw new InvalidIntent(`${field} must be greater than zero, got ${String(value)}`);
   }
   return value;
+}
+
+/**
+ * Strip a trailing `#bucket` suffix off an internal bucket-wallet owner id, back to the
+ * player's real OwnerId. A no-op for the base ('cash') wallet, which was never suffixed.
+ */
+function stripBucketSuffix(ownerId: OwnerId): OwnerId {
+  const i = ownerId.lastIndexOf('#');
+  if (i === -1) return ownerId;
+  return isWalletBucket(ownerId.slice(i + 1)) ? ownerId.slice(0, i) : ownerId;
+}
+
+/**
+ * The bucket a rental was paid from, read from its structured `meta`. Missing (a rental from
+ * before this feature existed) defaults to 'cash' — the only bucket that ever existed before.
+ * A present-but-invalid value means the tx cannot really be a rental: reported the same as any
+ * other malformed rental, not a crash, and without creating a stray wallet for a garbage name.
+ */
+function requireRentalBucket(rental: Tx | null): WalletBucket {
+  const raw = rental?.memo.meta?.['bucket'];
+  if (raw === undefined) return 'cash';
+  if (isWalletBucket(raw)) return raw;
+  throw new UnknownRental('No such rental for this player');
+}
+
+/** Same idea as requireRentalBucket, for a PlaceBet's wager bucket. */
+function requireBetBucket(bet: Tx | null): WalletBucket {
+  const raw = bet?.memo.meta?.['bucket'];
+  if (raw === undefined) return 'cash';
+  if (isWalletBucket(raw)) return raw;
+  throw new UnknownBet('No such bet for this player');
 }
 
 /**

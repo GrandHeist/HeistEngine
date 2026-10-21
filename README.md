@@ -16,7 +16,8 @@ which is what keeps this inside Rockstar/FiveM's rules around crypto-related con
 
 | | Status |
 |---|---|
-| Economy engine (12 intents + 2 admin-only calls), config-driven prices and entities | **works** |
+| Economy engine (13 intents + 2 admin-only calls), config-driven prices and entities | **works** |
+| Multi-bucket player wallets (cash/bank/dirty) and laundering, every operation defaults to cash | **works** |
 | **Memory** ledger backend (tests, dry runs) | **works** |
 | **SQLite** ledger backend (`node:sqlite`, file-backed, hash-chained, tamper-checked) | **works** |
 | **Postgres** ledger backend (`pg`, schema-isolated, same conformance suite as the other two) | **works** |

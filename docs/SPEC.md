@@ -19,6 +19,7 @@ around crypto-related content.
 | Piece | Status |
 |---|---|
 | Intent router, config, entity wallets, admin funding | **[built]** |
+| Multi-bucket player wallets (cash / bank / dirty) + LaunderMoney | **[built]**; every operation defaults to cash, a server owner opts into bank/dirty per operation in config |
 | Memory + SQLite + Postgres backends, hash chain, integrity verification, checkpoints | **[built]** |
 | Standalone CLI simulator | **[built]** |
 | Solana backend | **[planned]**, not built |
@@ -178,6 +179,33 @@ The economy has wallets that aren't players:
 
 Entity wallets are owned by the server but each is a real, addressable ledger account, so you can see the full flow of money — e.g., "the hospital made 12,400 HD this week." Entity ids are **reserved**: a player intent can never name one as actor, recipient or victim. Entities start empty; an operator funds them with `EconomyEngine.fundEntity` (admin only, not an intent; the sim's `fund` command).
 
+## Money buckets: cash, bank, dirty — [built]
+
+Every player can have up to three separate wallets — `cash` (on hand, robbable by `Theft`), `bank`
+(safe from `Theft`), and `dirty` (hot money — e.g. `RobEntity` proceeds — unusable until
+`LaunderMoney` converts it) — matching real ESX/QBCore server convention (ESX ships
+`bank`/`money`/`black_money` by default). Entities are never split into buckets, only players.
+
+`cash` is the ORIGINAL single wallet every owner has always had, unsuffixed internally — a
+config that never mentions buckets behaves byte-identical to the engine before this existed.
+`bank` and `dirty` are separate ledger wallets, created lazily the first time an operation
+actually uses them, so a single-bucket server never creates them at all.
+
+Which bucket each operation's player-side wallet uses is config-driven
+(`walletBuckets.<operation>`, default `cash` for every operation) and overridable per call
+(most intents take an optional `bucket` field) — "however the server is set up" rather than an
+opinion this engine holds. `RentVehicle`/`PlaceBet` remember the bucket they used in the tx's
+`meta`, so `ReturnVehicle`/`SettleBet` pay back into that SAME bucket, never a different one.
+
+`LaunderMoney` is the only path out of `dirty`: it converts an amount from the player's dirty
+bucket into their chosen `cash`/`bank`, minus `laundering.cutPercent` (default 10%) paid to
+`laundering.feeEntity` (default `treasury`). It is two ledger writes, not one — a transfer only
+ever moves money between two wallets, and this moves it to two destinations. Both run inside the
+engine's single intent-at-a-time lock, so nothing else can observe a half-done state; the only
+way to see one is a process crash between the two writes, and even then every HD is still
+visibly sitting in a real wallet — nothing is burned or created, just not yet at its second
+destination. There is no automatic resumption for a stuck fee leg today.
+
 ## Intent catalog (v1) — [built]
 
 | Intent | Payer | Payee | Trigger |
@@ -194,6 +222,7 @@ Entity wallets are owned by the server but each is a real, addressable ledger ac
 | `RobEntity` | entity | robber | robbing a store/bank/ATM, not a player — unlike Theft, the source cannot consent, so this is **admin-authorized only** |
 | `PlaceBet` | player | casino entity | the wager |
 | `SettleBet` | casino entity | player | pays out a WON bet, referencing the `PlaceBet` txId; a loss needs no call at all |
+| `LaunderMoney` | player's `dirty` bucket | player's own `cash`/`bank` (minus a cut to `laundering.feeEntity`) | the only way dirty money becomes spendable |
 | *(not an intent)* `fundEntity` | mint | entity | operator only |
 | *(not an intent)* `taxEntity` | entity | entity | operator/scheduled job only — the one operation with no player on either side (e.g. periodic business-to-government tax) |
 
@@ -217,6 +246,8 @@ The real format is JSON (`heist.config.json`, validated at load; there is no YAM
   "prices": { "bike_rental": "10" },
   "rentalPerMinute": { "bike": "1", "car": "3", "helicopter": "25" },
   "rentalEntity": "bike-rental-co",
+  "walletBuckets": { "payout": "bank", "robberyProceeds": "dirty" },
+  "laundering": { "cutPercent": "10", "feeEntity": "treasury" },
   "services": {
     "hospital_full_heal": { "entity": "hospital", "price": "200" },
     "gas_per_liter": { "entity": "gas-station-1", "price": "2" }

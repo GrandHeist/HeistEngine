@@ -224,6 +224,80 @@ describe('config — rentalEntity must resolve to a real entity AT LOAD TIME', (
   });
 });
 
+describe('config — walletBuckets defaults to cash everywhere, overridable per key', () => {
+  test('validateConfig applies the cash-everywhere default when walletBuckets is absent', () => {
+    const config = validateConfig(withDefaults({}));
+    for (const value of Object.values(config.walletBuckets)) {
+      assert.equal(value, 'cash');
+    }
+  });
+
+  test('a partial override merges with the defaults rather than replacing them', () => {
+    const config = validateConfig(withDefaults({ walletBuckets: { payout: 'bank' } }));
+    assert.equal(config.walletBuckets.payout, 'bank');
+    assert.equal(config.walletBuckets.rental, 'cash', 'untouched keys keep their default');
+  });
+
+  test('an invalid bucket value is rejected', () => {
+    throwsWithCode(
+      () => validateConfig(withDefaults({ walletBuckets: { payout: 'crypto' } })),
+      'INVALID_INTENT',
+      'only cash | bank | dirty are valid buckets',
+    );
+  });
+
+  test('an unknown walletBuckets key is rejected rather than silently ignored', () => {
+    throwsWithCode(
+      () => validateConfig(withDefaults({ walletBuckets: { rent: 'cash' } })), // typo for "rental"
+      'INVALID_INTENT',
+      'a typo\'d key must fail loudly, not be silently ignored',
+    );
+  });
+});
+
+describe('config — laundering must resolve to a real entity AT LOAD TIME', () => {
+  test('defaults to a 10% cut paid to the treasury', () => {
+    const config = validateConfig(withDefaults({}));
+    assert.equal(config.laundering.cutPercent, '10');
+    assert.equal(config.laundering.feeEntity, 'treasury');
+  });
+
+  test('feeEntity must be a configured entity id', () => {
+    throwsWithCode(
+      () => validateConfig(withDefaults({ laundering: { feeEntity: 'laundromat-that-does-not-exist' } })),
+      'INVALID_INTENT',
+      'a mistyped fee entity must be a startup failure',
+    );
+  });
+
+  test('cutPercent accepts the edges (0 and 100) and rejects out-of-range or malformed values', () => {
+    for (const cutPercent of ['0', '100']) {
+      const config = validateConfig(withDefaults({ laundering: { cutPercent } }));
+      assert.equal(config.laundering.cutPercent, cutPercent);
+    }
+    for (const cutPercent of ['101', '-5', '5.5', 'ten', '']) {
+      throwsWithCode(
+        () => validateConfig(withDefaults({ laundering: { cutPercent } })),
+        'INVALID_INTENT',
+        `cutPercent ${JSON.stringify(cutPercent)} must be rejected`,
+      );
+    }
+  });
+});
+
+describe('config — an entity id may not contain "#"', () => {
+  test('validateConfig rejects it — "#" is reserved for internal bucket wallet keys', () => {
+    throwsWithCode(
+      () =>
+        validateConfig(
+          withDefaults({ entities: [...defaultConfig().entities, { id: 'player-1#bank', name: 'Oops' }] }),
+        ),
+      'INVALID_INTENT',
+      'an entity id with "#" could collide with a player bucket wallet',
+    );
+  });
+});
+
 describe('config — money is never a JSON number', () => {
   test('a numeric welcomeGrant is rejected', () => {
     throwsWithCode(

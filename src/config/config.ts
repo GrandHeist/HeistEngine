@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { EngineError, InvalidAmount, InvalidIntent, UnknownEntity } from '../errors.ts';
 import type { BackendName } from '../ledger/backend.ts';
+import type { WalletBucket } from '../types.ts';
 
 /** An NPC/system account. `treasury` is mandatory — it is the mint source. */
 export interface EntityConfig {
@@ -56,6 +57,31 @@ export interface HeistConfig {
    * it at a different entity id — no code change needed.
    */
   rentalEntity: string;
+  /**
+   * Default money bucket for each operation's player-side wallet, used whenever the intent
+   * itself doesn't name a `bucket`. A server running everything on 'cash' (the default for
+   * every key) never creates a bank or dirty wallet at all — this is purely additive over the
+   * original single-balance design.
+   */
+  walletBuckets: {
+    welcomeGrant: WalletBucket;
+    rental: WalletBucket;
+    buyService: WalletBucket;
+    payout: WalletBucket;
+    fine: WalletBucket;
+    transfer: WalletBucket;
+    theft: WalletBucket;
+    depositToSociety: WalletBucket;
+    robberyProceeds: WalletBucket;
+    bet: WalletBucket;
+  };
+  /** LaunderMoney: converting `dirty` money into `cash`/`bank`, minus a cut. */
+  laundering: {
+    /** Whole percent 0-100 taken as a fee. Decimal string; HD is indivisible, so is this. */
+    cutPercent: string;
+    /** Entity id that receives the cut. MUST match a configured entity. */
+    feeEntity: string;
+  };
   entities: EntityConfig[];
   /**
    * Owner ids of staff who may authorize privileged intents (currently: Theft, alongside
@@ -73,6 +99,12 @@ export interface HeistConfig {
 export const TREASURY_ID = 'treasury';
 
 const BACKEND_NAMES: readonly BackendName[] = ['memory', 'sqlite', 'postgres', 'solana'];
+
+export const WALLET_BUCKETS: readonly WalletBucket[] = ['cash', 'bank', 'dirty'];
+
+export function isWalletBucket(value: string): value is WalletBucket {
+  return (WALLET_BUCKETS as readonly string[]).includes(value);
+}
 
 const DEFAULT_CONFIG_FILENAME = 'heist.config.json';
 
@@ -129,6 +161,23 @@ export function parseAmount(value: string, field: string): bigint {
     if (cause instanceof InvalidAmount) throw new InvalidIntent(`config: ${cause.message}`);
     throw cause;
   }
+}
+
+/**
+ * A whole percent, 0-100 inclusive, as a decimal string (e.g. laundering's cut). 0 is a valid,
+ * meaningful choice (no fee) — unlike money amounts, this is never rejected for being zero.
+ */
+export function parsePercent(value: unknown, field: string): bigint {
+  if (typeof value !== 'string' || !/^(\d{1,3})$/.test(value.trim())) {
+    throw new InvalidIntent(
+      `config: ${field} must be a whole-number percent string from "0" to "100", got ${describe(value)}`,
+    );
+  }
+  const n = BigInt(value.trim());
+  if (n > 100n) {
+    throw new InvalidIntent(`config: ${field} must not exceed 100, got ${value}`);
+  }
+  return n;
 }
 
 /**
@@ -205,6 +254,25 @@ export function defaultConfig(): HeistConfig {
       helicopter: '25',
     },
     rentalEntity: 'bike-rental-co',
+    // Every key defaults to 'cash' — a config that never mentions walletBuckets behaves
+    // BYTE-IDENTICAL to the engine before buckets existed (one wallet, same as always). A
+    // server owner opts into bank/dirty explicitly, per operation, in their own config.
+    walletBuckets: {
+      welcomeGrant: 'cash',
+      rental: 'cash',
+      buyService: 'cash',
+      payout: 'cash',
+      fine: 'cash',
+      transfer: 'cash',
+      theft: 'cash',
+      depositToSociety: 'cash',
+      robberyProceeds: 'cash',
+      bet: 'cash',
+    },
+    laundering: {
+      cutPercent: '10',
+      feeEntity: 'treasury',
+    },
     entities: [
       { id: 'treasury', name: 'City Treasury' },
       { id: 'bike-rental-co', name: 'Crystal Bikes' },
@@ -336,6 +404,33 @@ export function validateConfig(input: unknown, source = '<inline>'): HeistConfig
     );
   }
 
+  // walletBuckets --------------------------------------------------------
+  const walletBuckets = readWalletBuckets(input['walletBuckets'], defaults.walletBuckets, source);
+
+  // laundering -------------------------------------------------------------
+  const launderingRaw = input['laundering'] ?? defaults.laundering;
+  if (!isRecord(launderingRaw)) {
+    throw new InvalidIntent(
+      `config (${source}): laundering must be an object like { "cutPercent": "10", "feeEntity": "treasury" }, got ${describe(launderingRaw)}`,
+    );
+  }
+  const cutPercentRaw = launderingRaw['cutPercent'] ?? defaults.laundering.cutPercent;
+  parsePercent(cutPercentRaw, 'laundering.cutPercent');
+  const feeEntityRaw = launderingRaw['feeEntity'] ?? defaults.laundering.feeEntity;
+  if (typeof feeEntityRaw !== 'string' || feeEntityRaw.trim() === '') {
+    throw new InvalidIntent(
+      `config (${source}): laundering.feeEntity must be a non-empty string, got ${describe(feeEntityRaw)}`,
+    );
+  }
+  const feeEntity = feeEntityRaw.trim();
+  if (!entityIds.has(feeEntity)) {
+    throw new InvalidIntent(
+      `config (${source}): laundering.feeEntity = ${JSON.stringify(feeEntity)} is not a ` +
+        `configured entity id. Add it to "entities" or point laundering.feeEntity at one of: ${[...entityIds].join(', ')}`,
+    );
+  }
+  const laundering = { cutPercent: String(cutPercentRaw).trim(), feeEntity };
+
   const admins = readAdmins(input['admins'], defaults.admins, entities, source);
 
   const config: HeistConfig = {
@@ -346,6 +441,8 @@ export function validateConfig(input: unknown, source = '<inline>'): HeistConfig
     prices,
     rentalPerMinute,
     rentalEntity,
+    walletBuckets,
+    laundering,
     entities,
     admins,
   };
@@ -476,6 +573,37 @@ function readServices(
   return out;
 }
 
+/** Merge-with-defaults: a server owner may override just one key and keep the rest. */
+function readWalletBuckets(
+  raw: unknown,
+  fallback: HeistConfig['walletBuckets'],
+  source: string,
+): HeistConfig['walletBuckets'] {
+  if (raw === undefined || raw === null) return { ...fallback };
+  if (!isRecord(raw)) {
+    throw new InvalidIntent(
+      `config (${source}): walletBuckets must be an object of operation -> "cash" | "bank" | "dirty", got ${describe(raw)}`,
+    );
+  }
+  const out = { ...fallback };
+  for (const key of Object.keys(fallback) as (keyof HeistConfig['walletBuckets'])[]) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !isWalletBucket(value)) {
+      throw new InvalidIntent(
+        `config (${source}): walletBuckets.${key} must be one of ${WALLET_BUCKETS.join(' | ')}, got ${describe(value)}`,
+      );
+    }
+    out[key] = value;
+  }
+  for (const key of Object.keys(raw)) {
+    if (!Object.hasOwn(fallback, key)) {
+      throw new InvalidIntent(`config (${source}): walletBuckets has an unknown key "${key}"`);
+    }
+  }
+  return out;
+}
+
 function readAdmins(
   raw: unknown,
   fallback: string[],
@@ -533,6 +661,11 @@ function readEntities(raw: unknown, source: string): EntityConfig[] {
     const trimmedId = id.trim();
     if (seen.has(trimmedId)) {
       throw new InvalidIntent(`config (${source}): duplicate entity id "${trimmedId}"`);
+    }
+    // '#' is reserved for internal bucket wallet keys (`${ownerId}#bank`) — an entity id
+    // containing one could collide with a player's bucket wallet.
+    if (trimmedId.includes('#')) {
+      throw new InvalidIntent(`config (${source}): entity id "${trimmedId}" may not contain "#"`);
     }
     seen.add(trimmedId);
 

@@ -18,6 +18,22 @@
     "helicopter": "25"
   },
   "rentalEntity": "bike-rental-co",
+  "walletBuckets": {
+    "welcomeGrant": "cash",
+    "rental": "cash",
+    "buyService": "cash",
+    "payout": "cash",
+    "fine": "cash",
+    "transfer": "cash",
+    "theft": "cash",
+    "depositToSociety": "cash",
+    "robberyProceeds": "cash",
+    "bet": "cash"
+  },
+  "laundering": {
+    "cutPercent": "10",
+    "feeEntity": "treasury"
+  },
   "entities": [
     { "id": "treasury", "name": "City Treasury" },
     { "id": "bike-rental-co", "name": "Crystal Bikes" },

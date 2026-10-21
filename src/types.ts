@@ -6,6 +6,16 @@ export type WalletId = string;
 export type OwnerId = string;
 export type TxId = string;
 
+/**
+ * A player's money comes in three flavours, matching real FiveM RP server convention
+ * (ESX ships `bank`/`money`/`black_money` by default): `cash` on hand (robbable by Theft),
+ * `bank` (safe from Theft), and `dirty` (hot money — e.g. robbery proceeds — unusable until
+ * LaunderMoney converts it). `cash` is the original single balance every wallet always had;
+ * `bank`/`dirty` are additive and only come into existence if an operation actually uses them.
+ * Entities (NPC/system accounts) are never split into buckets — only players are.
+ */
+export type WalletBucket = 'cash' | 'bank' | 'dirty';
+
 /** A ledger account. Players and NPC entities both get one — they are indistinguishable to the ledger. */
 export interface Wallet {
   id: WalletId;
@@ -85,7 +95,8 @@ export type IntentType =
   | 'DepositToSociety'
   | 'RobEntity'
   | 'PlaceBet'
-  | 'SettleBet';
+  | 'SettleBet'
+  | 'LaunderMoney';
 
 export interface BaseIntent {
   type: IntentType;
@@ -102,6 +113,8 @@ export interface RentVehicleIntent extends BaseIntent {
   type: 'RentVehicle';
   vehicle: string;
   minutes: number;
+  /** Which bucket pays. Defaults to config's `walletBuckets.rental` if omitted. */
+  bucket?: WalletBucket;
 }
 export interface ReturnVehicleIntent extends BaseIntent {
   type: 'ReturnVehicle';
@@ -115,21 +128,29 @@ export interface BuyServiceIntent extends BaseIntent {
   service: string;
   /** Multiplier for metered services (litres of fuel, etc). Defaults to 1. */
   units?: number;
+  /** Which bucket pays. Defaults to config's `walletBuckets.buyService` if omitted. */
+  bucket?: WalletBucket;
 }
 export interface PayoutIntent extends BaseIntent {
   type: 'Payout';
   employer: OwnerId;
   amount: string;
+  /** Which bucket receives it. Defaults to config's `walletBuckets.payout` if omitted. */
+  bucket?: WalletBucket;
 }
 export interface FineIntent extends BaseIntent {
   type: 'Fine';
   amount: string;
   reason?: string;
+  /** Which bucket pays. Defaults to config's `walletBuckets.fine` if omitted. */
+  bucket?: WalletBucket;
 }
 export interface TransferIntent extends BaseIntent {
   type: 'Transfer';
   to: OwnerId;
   amount: string;
+  /** Bucket on BOTH sides — handing over cash or an e-transfer between banks. Defaults to config's `walletBuckets.transfer`. */
+  bucket?: WalletBucket;
 }
 export interface TheftIntent extends BaseIntent {
   type: 'Theft';
@@ -137,6 +158,8 @@ export interface TheftIntent extends BaseIntent {
   amount: string;
   /** Theft requires explicit authorization — consent or admin. */
   authorizedBy: string;
+  /** Bucket on BOTH sides. Defaults to config's `walletBuckets.theft` if omitted. */
+  bucket?: WalletBucket;
 }
 /**
  * player -> any configured entity, an arbitrary amount. The generic primitive behind a
@@ -149,6 +172,8 @@ export interface DepositToSocietyIntent extends BaseIntent {
   type: 'DepositToSociety';
   entity: OwnerId;
   amount: string;
+  /** Which bucket pays. Defaults to config's `walletBuckets.depositToSociety` if omitted. */
+  bucket?: WalletBucket;
 }
 /**
  * entity -> player (the robber). Unlike Theft, the source is an NPC/system account, which cannot
@@ -159,12 +184,16 @@ export interface RobEntityIntent extends BaseIntent {
   entity: OwnerId;
   amount: string;
   authorizedBy: string;
+  /** Which bucket the robber receives into. Defaults to config's `walletBuckets.robberyProceeds` if omitted. */
+  bucket?: WalletBucket;
 }
 /** player -> casino/gambling entity. The wager. Settled (if won) by a later SettleBet. */
 export interface PlaceBetIntent extends BaseIntent {
   type: 'PlaceBet';
   casino: OwnerId;
   amount: string;
+  /** Which bucket wagers. Defaults to config's `walletBuckets.bet` if omitted. SettleBet pays winnings back into this same bucket. */
+  bucket?: WalletBucket;
 }
 /**
  * casino entity -> player, paying out a WON bet. `betId` is the `txId` PlaceBet returned. Only
@@ -175,6 +204,18 @@ export interface SettleBetIntent extends BaseIntent {
   type: 'SettleBet';
   betId: TxId;
   payout: string;
+}
+
+/**
+ * player's `dirty` bucket -> the player's own chosen clean bucket, minus a cut that goes to
+ * the configured `laundering.feeEntity`. The only path dirty money has back to being ordinary
+ * cash or bank money — without this, `dirty` would be a dead end.
+ */
+export interface LaunderMoneyIntent extends BaseIntent {
+  type: 'LaunderMoney';
+  amount: string;
+  /** The clean bucket to launder into. Never 'dirty' — laundering INTO dirty makes no sense. */
+  toBucket: 'cash' | 'bank';
 }
 
 export type Intent =
@@ -189,7 +230,8 @@ export type Intent =
   | DepositToSocietyIntent
   | RobEntityIntent
   | PlaceBetIntent
-  | SettleBetIntent;
+  | SettleBetIntent
+  | LaunderMoneyIntent;
 
 /** What the engine hands back to the adapter. The adapter renders this and nothing else. */
 export interface IntentResult {
