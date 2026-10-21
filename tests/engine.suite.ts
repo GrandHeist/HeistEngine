@@ -463,6 +463,28 @@ export function engineSuite(factory: BackendFactory): void {
       assert.equal(expectOk(result).newBalance, WELCOME_GRANT - 20n, 'refund is 10, not 5 * 10');
     });
 
+    test('a server owner can redirect vehicle rental income at a custom entity', async () => {
+      await openAccount('player-1');
+      const custom = {
+        ...testConfig(),
+        entities: [...testConfig().entities, { id: 'northside-choppers', name: 'Northside Choppers' }],
+        rentalEntity: 'northside-choppers',
+      };
+      const customEngine = new EconomyEngine({ backend, custody, config: custom });
+      await customEngine.init();
+
+      const result = await customEngine.submit({
+        type: 'RentVehicle',
+        nonce: nonce('rent'),
+        actor: 'player-1',
+        vehicle: 'bike',
+        minutes: 30,
+      });
+      assert.equal(expectOk(result).newBalance, WELCOME_GRANT - 30n);
+      assert.equal(await balanceOf('northside-choppers'), 30n);
+      assert.equal(await balanceOf(RENTAL_ENTITY), 0n, 'the default rental entity received nothing');
+    });
+
     test('only the renter can return it, and only a real RentVehicle tx counts', async () => {
       await openAccount('player-1');
       await openAccount('player-2');

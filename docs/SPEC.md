@@ -167,7 +167,7 @@ The economy has wallets that aren't players:
 | Entity | Purpose |
 |---|---|
 | `treasury` | Mint authority for welcome grants (a grant is a mint attributed to the treasury, ADR 0004). Also receives fines. |
-| `bike-rental-co` | Receives rental fees, pays refunds. |
+| *(`rentalEntity` in config, default `bike-rental-co`)* | Receives rental fees, pays refunds. A server owner points this at any configured entity — no code change. |
 | `hospital` | Receives medical fees. |
 | `gas-station-N` | One per gas station. |
 | `taxi-co`, `pd-payroll`, etc. | Job-based payouts. |
@@ -183,8 +183,8 @@ Entity wallets are owned by the server but each is a real, addressable ledger ac
 | Intent | Payer | Payee | Trigger |
 |---|---|---|---|
 | `OpenAccount` | mint (treasury authority) | new player | first join; once per owner; welcome grant from config |
-| `RentVehicle` | player | `bike-rental-co` | NPC interaction; records `vehicle` and `minutes` in the tx |
-| `ReturnVehicle` | `bike-rental-co` | player | return by rental id; refund is `paid × unused / rented`; once per rental |
+| `RentVehicle` | player | configured `rentalEntity` | NPC interaction; records `vehicle` and `minutes` in the tx |
+| `ReturnVehicle` | configured `rentalEntity` | player | return by rental id; refund is `paid × unused / rented`; once per rental |
 | `BuyService` | player | service entity | hospital, gas, food, **and any fixed-price catalog item** — impound release, a vehicle, a property, rent, since these are all just a `services` config entry, not a new intent |
 | `Payout` | employer entity | player | end-of-shift, job completion, **or any entity paying a player an adapter-decided amount** — a chop-shop buying a stolen vehicle, an NPC drug buyer, recurring wages, are all just `Payout` with a different employer id and memo |
 | `Fine` | player | `treasury` | police action |
@@ -198,6 +198,8 @@ Entity wallets are owned by the server but each is a real, addressable ledger ac
 | *(not an intent)* `taxEntity` | entity | entity | operator/scheduled job only — the one operation with no player on either side (e.g. periodic business-to-government tax) |
 
 **Deliberately not separate intents.** `WithdrawFromSociety`, `PayWage`, `SellStolenVehicle` and `SellContraband` (to an NPC) are mechanically identical to `Payout` — an entity paying a player an amount the adapter decides — so they reuse it with a different employer id and memo rather than duplicating the same code under a new name. `BuyVehicle`, `BuyProperty`, `ImpoundRelease` and `PayRent` (when the rent is a fixed amount) are `BuyService` catalog entries. A peer-to-peer contraband sale is `Transfer`. `SendInvoice`/`PayInvoice` (a bill that is recorded before it's paid) is NOT covered yet — it needs the backend to track an unpaid, not-yet-settled obligation, which none of the three ledger backends currently have a concept for. That is real new backend work, not just a new intent, and deserves its own pass rather than being forced in here.
+
+**Custom jobs and businesses — config only, no code.** A server owner adding their own job or business almost never needs a new intent: add an entity to `entities` and either a `services` catalog entry (a fixed-price purchase — `BuyService`), or have the adapter call `Payout`/`DepositToSociety` naming that entity (an adapter-decided wage or deposit). `rentalEntity` works the same way for vehicle rental income. This covers the vast majority of custom RP jobs and shops; it is only when a job needs genuinely new ledger state — see `SendInvoice`/`PayInvoice` above — that new engine code is required.
 
 **What the engine cannot verify.** Until adapter authentication exists (ADR 0003), the engine takes the `actor` and any `authorizedBy` claim at the adapter's word. It checks that they are well-formed, that entities are not players, and that an authorizer is the victim or a configured admin. It cannot check that the adapter is telling the truth. ADR 0004 lists exactly what remains open.
 
@@ -214,6 +216,7 @@ The real format is JSON (`heist.config.json`, validated at load; there is no YAM
   "admins": [],
   "prices": { "bike_rental": "10" },
   "rentalPerMinute": { "bike": "1", "car": "3", "helicopter": "25" },
+  "rentalEntity": "bike-rental-co",
   "services": {
     "hospital_full_heal": { "entity": "hospital", "price": "200" },
     "gas_per_liter": { "entity": "gas-station-1", "price": "2" }

@@ -50,6 +50,12 @@ export interface HeistConfig {
   prices: Record<string, string>;
   /** vehicle key -> per-minute rental rate, decimal strings. */
   rentalPerMinute: Record<string, string>;
+  /**
+   * Entity id that collects vehicle rental fees and pays refunds. MUST match a
+   * configured entity. A server owner renames or replaces this business by pointing
+   * it at a different entity id — no code change needed.
+   */
+  rentalEntity: string;
   entities: EntityConfig[];
   /**
    * Owner ids of staff who may authorize privileged intents (currently: Theft, alongside
@@ -198,6 +204,7 @@ export function defaultConfig(): HeistConfig {
       car: '3',
       helicopter: '25',
     },
+    rentalEntity: 'bike-rental-co',
     entities: [
       { id: 'treasury', name: 'City Treasury' },
       { id: 'bike-rental-co', name: 'Crystal Bikes' },
@@ -311,12 +318,23 @@ export function validateConfig(input: unknown, source = '<inline>'): HeistConfig
   const entities = readEntities(input['entities'] ?? defaults.entities, source);
 
   // services ---------------------------------------------------------------
-  const services = readServices(
-    input['services'],
-    defaults.services,
-    new Set(entities.map((e) => e.id)),
-    source,
-  );
+  const entityIds = new Set(entities.map((e) => e.id));
+  const services = readServices(input['services'], defaults.services, entityIds, source);
+
+  // rentalEntity -------------------------------------------------------------
+  const rentalEntityRaw = input['rentalEntity'] ?? defaults.rentalEntity;
+  if (typeof rentalEntityRaw !== 'string' || rentalEntityRaw.trim() === '') {
+    throw new InvalidIntent(
+      `config (${source}): rentalEntity must be a non-empty string, got ${describe(rentalEntityRaw)}`,
+    );
+  }
+  const rentalEntity = rentalEntityRaw.trim();
+  if (!entityIds.has(rentalEntity)) {
+    throw new InvalidIntent(
+      `config (${source}): rentalEntity = ${JSON.stringify(rentalEntity)} is not a configured ` +
+        `entity id. Add it to "entities" or point rentalEntity at one of: ${[...entityIds].join(', ')}`,
+    );
+  }
 
   const admins = readAdmins(input['admins'], defaults.admins, entities, source);
 
@@ -327,6 +345,7 @@ export function validateConfig(input: unknown, source = '<inline>'): HeistConfig
     services,
     prices,
     rentalPerMinute,
+    rentalEntity,
     entities,
     admins,
   };

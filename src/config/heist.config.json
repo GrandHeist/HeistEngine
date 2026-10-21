@@ -17,6 +17,7 @@
     "car": "3",
     "helicopter": "25"
   },
+  "rentalEntity": "bike-rental-co",
   "entities": [
     { "id": "treasury", "name": "City Treasury" },
     { "id": "bike-rental-co", "name": "Crystal Bikes" },

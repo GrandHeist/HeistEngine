@@ -195,6 +195,35 @@ describe('config — services must resolve to a real entity AT LOAD TIME', () =>
   });
 });
 
+describe('config — rentalEntity must resolve to a real entity AT LOAD TIME', () => {
+  test('validateConfig throws for a rentalEntity pointing at an unconfigured entity', () => {
+    throwsWithCode(
+      () => validateConfig(withDefaults({ rentalEntity: 'bike-rental-co-typo' })),
+      'INVALID_INTENT',
+      'a mistyped rental payee must be a startup failure, never a runtime mispayment',
+    );
+  });
+
+  test('a server owner can point vehicle rentals at a different, custom entity', () => {
+    const custom = withDefaults({
+      entities: [...defaultConfig().entities, { id: 'crystal-bikes', name: 'Crystal Bikes' }],
+      rentalEntity: 'crystal-bikes',
+    });
+    const config = validateConfig(custom);
+    assert.equal(config.rentalEntity, 'crystal-bikes');
+  });
+
+  test('a malformed rentalEntity is rejected', () => {
+    for (const rentalEntity of ['', '   '] as unknown[]) {
+      throwsWithCode(
+        () => validateConfig(withDefaults({ rentalEntity })),
+        'INVALID_INTENT',
+        `malformed rentalEntity ${JSON.stringify(rentalEntity)}`,
+      );
+    }
+  });
+});
+
 describe('config — money is never a JSON number', () => {
   test('a numeric welcomeGrant is rejected', () => {
     throwsWithCode(

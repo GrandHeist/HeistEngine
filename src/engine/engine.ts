@@ -72,9 +72,6 @@ import type {
   WalletId,
 } from '../types.ts';
 
-/** The entity that rents out vehicles, per SPEC "Intent catalog". */
-const RENTAL_ENTITY: OwnerId = 'bike-rental-co';
-
 /** Price key used when a vehicle has no per-minute rate — a flat rental fee. */
 const FLAT_RENTAL_PRICE_KEY = 'bike_rental';
 
@@ -388,7 +385,7 @@ export class EconomyEngine {
     requirePositive(amount, 'rental cost');
 
     const player = await this.#requirePlayerWallet(intent.actor, 'actor');
-    const payee = await this.#requireEntityWallet(RENTAL_ENTITY);
+    const payee = await this.#requireEntityWallet(this.#config.rentalEntity);
 
     const ref = await this.#backend.transfer(
       player.id,
@@ -404,7 +401,7 @@ export class EconomyEngine {
     return await this.#result(
       ref,
       player.id,
-      `Paid ${this.#money(amount)} to ${this.#displayName(RENTAL_ENTITY)}.`,
+      `Paid ${this.#money(amount)} to ${this.#displayName(this.#config.rentalEntity)}.`,
     );
   }
 
@@ -421,7 +418,7 @@ export class EconomyEngine {
     const minutesUnused = requireWholeCount(intent.minutesUnused, 'minutesUnused');
 
     const player = await this.#requirePlayerWallet(intent.actor, 'actor');
-    const payer = await this.#requireEntityWallet(RENTAL_ENTITY);
+    const payer = await this.#requireEntityWallet(this.#config.rentalEntity);
 
     const { rental, rentedMinutes } = requireRental(
       await this.#backend.getTx(intent.rentalId),
@@ -452,7 +449,7 @@ export class EconomyEngine {
     return await this.#result(
       ref,
       player.id,
-      `Refunded ${this.#money(refund)} from ${this.#displayName(RENTAL_ENTITY)}.`,
+      `Refunded ${this.#money(refund)} from ${this.#displayName(this.#config.rentalEntity)}.`,
     );
   }
 
