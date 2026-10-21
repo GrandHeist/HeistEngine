@@ -58,6 +58,18 @@ export class BetSettled extends EngineError {
   }
 }
 
+export class UnknownLoan extends EngineError {
+  constructor(detail: string) {
+    super('UNKNOWN_LOAN', detail);
+  }
+}
+
+export class LoanClosed extends EngineError {
+  constructor(loanId: string) {
+    super('LOAN_CLOSED', `Loan ${loanId} is already fully repaid`);
+  }
+}
+
 export class InvalidIntent extends EngineError {
   constructor(detail: string) {
     super('INVALID_INTENT', detail);

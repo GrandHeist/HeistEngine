@@ -1231,6 +1231,86 @@ export function engineSuite(factory: BackendFactory): void {
     });
   });
 
+  describe(`EconomyEngine — loans [${factory.label}]`, () => {
+    async function takeLoan(actor: string, lender: string, principal: string): Promise<IntentResult> {
+      return expectOk(
+        await engine.submit({ type: 'TakeLoan', nonce: nonce('loan'), actor, lender, principal }),
+      );
+    }
+
+    test('TakeLoan disburses the principal and records the default 15% simple interest owed', async () => {
+      await openAccount('player-1');
+      await fundEntity('realty-office', 10_000n);
+
+      const loan = await takeLoan('player-1', 'realty-office', '1000');
+      assert.equal(loan.newBalance, WELCOME_GRANT + 1000n, 'principal lands in cash by default');
+      assert.equal(await balanceOf('realty-office'), 9000n);
+
+      const tx = await backend.getTx(loan.txId);
+      assert.equal(tx?.memo.meta?.['owed'], '1150', '1000 + 15% charged once at issuance');
+    });
+
+    test('RepayLoan accepts installments, refuses to overpay, and closes once fully repaid', async () => {
+      await openAccount('player-1');
+      await fundEntity('realty-office', 10_000n);
+      const loan = await takeLoan('player-1', 'realty-office', '1000'); // 1150 owed
+
+      const first = expectOk(
+        await engine.submit({ type: 'RepayLoan', nonce: nonce('repay'), actor: 'player-1', loanId: loan.txId, amount: '500' }),
+      );
+      assert.ok(first.message.includes('650'), 'reports 650 still owed');
+
+      expectFail(
+        await engine.submit({ type: 'RepayLoan', nonce: nonce('repay'), actor: 'player-1', loanId: loan.txId, amount: '700' }),
+        'INVALID_INTENT', // only 650 remains
+      );
+
+      expectOk(
+        await engine.submit({ type: 'RepayLoan', nonce: nonce('repay'), actor: 'player-1', loanId: loan.txId, amount: '650' }),
+      );
+      assert.equal(await balanceOf('realty-office'), 10_150n, '9000 after lending, plus the full 1150 repaid');
+
+      expectFail(
+        await engine.submit({ type: 'RepayLoan', nonce: nonce('repay'), actor: 'player-1', loanId: loan.txId, amount: '1' }),
+        'LOAN_CLOSED',
+      );
+    });
+
+    test('one player cannot repay another player\'s loan', async () => {
+      await openAccount('player-1');
+      await openAccount('player-2');
+      await fundEntity('realty-office', 10_000n);
+      const loan = await takeLoan('player-1', 'realty-office', '1000');
+
+      expectFail(
+        await engine.submit({ type: 'RepayLoan', nonce: nonce('repay'), actor: 'player-2', loanId: loan.txId, amount: '10' }),
+        'UNKNOWN_LOAN',
+      );
+    });
+
+    test('an insufficient lender refuses the loan, same as any other entity payout', async () => {
+      await openAccount('player-1');
+      expectFail(
+        await engine.submit({ type: 'TakeLoan', nonce: nonce('loan'), actor: 'player-1', lender: 'realty-office', principal: '1000' }),
+        'INSUFFICIENT_FUNDS',
+      );
+    });
+
+    test('a replayed TakeLoan nonce returns the original result and does not double-disburse', async () => {
+      await openAccount('player-1');
+      await fundEntity('realty-office', 10_000n);
+      const first = expectOk(
+        await engine.submit({ type: 'TakeLoan', nonce: 'loan-once', actor: 'player-1', lender: 'realty-office', principal: '1000' }),
+      );
+      const replay = expectOk(
+        await engine.submit({ type: 'TakeLoan', nonce: 'loan-once', actor: 'player-1', lender: 'realty-office', principal: '1000' }),
+      );
+      assert.equal(replay.txId, first.txId);
+      assert.equal(replay.replayed, true);
+      assert.equal(await balanceOf('realty-office'), 9000n, 'only disbursed once');
+    });
+  });
+
   describe(`EconomyEngine — replay protection [${factory.label}]`, () => {
     test('a replayed OpenAccount nonce returns the original result and does not double-grant', async () => {
       const first = expectOk(

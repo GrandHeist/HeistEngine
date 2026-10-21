@@ -28,10 +28,12 @@ import {
   InvalidAmount,
   InvalidIntent,
   LedgerCorrupt,
+  LoanClosed,
   NotAuthorized,
   RentalClosed,
   UnknownBet,
   UnknownEntity,
+  UnknownLoan,
   UnknownRental,
   UnknownWallet,
 } from '../errors.ts';
@@ -66,12 +68,15 @@ import type {
   PayoutIntent,
   PlaceBetIntent,
   RentVehicleIntent,
+  RepayLoanIntent,
   ReturnVehicleIntent,
   RobEntityIntent,
   SettleBetIntent,
+  TakeLoanIntent,
   TheftIntent,
   TransferIntent,
   Tx,
+  TxId,
   Wallet,
   WalletBucket,
   WalletId,
@@ -97,6 +102,8 @@ const PUBLIC_CODES: ReadonlySet<string> = new Set([
   'RENTAL_CLOSED',
   'UNKNOWN_BET',
   'BET_SETTLED',
+  'UNKNOWN_LOAN',
+  'LOAN_CLOSED',
 ]);
 
 /** For a replayed nonce: which side of the tx is the party that initiated that intent type. */
@@ -107,6 +114,7 @@ const INITIATOR_IS_RECIPIENT: ReadonlySet<string> = new Set([
   'Theft',
   'RobEntity',
   'SettleBet',
+  'TakeLoan',
 ]);
 
 /** Longest fine reason kept in a memo. */
@@ -341,6 +349,10 @@ export class EconomyEngine {
         return await this.#settleBet(intent);
       case 'LaunderMoney':
         return await this.#launderMoney(intent);
+      case 'TakeLoan':
+        return await this.#takeLoan(intent);
+      case 'RepayLoan':
+        return await this.#repayLoan(intent);
       default:
         throw new InvalidIntent(`Unknown intent type ${JSON.stringify(unknownType(intent))}`);
     }
@@ -808,6 +820,70 @@ export class EconomyEngine {
     );
   }
 
+  /**
+   * any configured entity (the lender) -> player, the principal. Interest is simple, charged
+   * once here, never accruing further — `owed` (principal + interest) is stored in this tx's
+   * own `meta` as the authoritative total due, since it can never be mutated later.
+   */
+  async #takeLoan(intent: TakeLoanIntent): Promise<IntentResult> {
+    const principal = this.#intentAmount(intent.principal, 'principal');
+    const interestPercent = parsePercent(this.#config.loans.interestPercent, 'loans.interestPercent');
+    const owed = principal + (principal * interestPercent) / 100n;
+
+    const lender = await this.#requireEntityWallet(intent.lender);
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.loan);
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const player = await this.#bucketWallet(basePlayer, bucket);
+
+    const ref = await this.#backend.transfer(lender.id, player.id, principal, {
+      ...this.#memo(intent, `loan from ${this.#displayName(intent.lender)}`),
+      meta: { lender: intent.lender, owed: owed.toString() },
+    });
+
+    return await this.#result(
+      ref,
+      player.id,
+      `Borrowed ${this.#money(principal)} from ${this.#displayName(intent.lender)}; ${this.#money(owed)} owed in total.`,
+    );
+  }
+
+  /**
+   * player -> the loan's lender, an installment or the final payment. Always debited from
+   * `loans.repaymentBucket` (see RepayLoanIntent) so "how much has this player repaid toward
+   * loan X" is answerable by scanning exactly that one wallet's history for RepayLoan txs
+   * naming this loanId — the engine has no secondary index by meta field, so this is a real
+   * O(that wallet's history) scan, not a stored running balance. Fine for a friends server;
+   * documented, not hidden.
+   */
+  async #repayLoan(intent: RepayLoanIntent): Promise<IntentResult> {
+    assertNonEmpty(intent.loanId, 'loanId');
+    const amount = this.#intentAmount(intent.amount, 'amount');
+
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const player = await this.#bucketWallet(basePlayer, this.#config.loans.repaymentBucket);
+
+    const loan = await this.#requireLoan(await this.#backend.getTx(intent.loanId), intent.actor);
+    const lender = await this.#requireEntityWallet(loan.lender);
+
+    const repaidSoFar = await this.#repaidSoFar(player.id, intent.loanId);
+    const remaining = loan.owed - repaidSoFar;
+    if (remaining <= 0n) throw new LoanClosed(intent.loanId);
+    if (amount > remaining) {
+      throw new InvalidIntent(`amount (${this.#money(amount)}) exceeds the ${this.#money(remaining)} still owed on this loan`);
+    }
+
+    const ref = await this.#backend.transfer(player.id, lender.id, amount, {
+      ...this.#memo(intent, `loan repayment to ${this.#displayName(loan.lender)}`),
+      meta: { loan: intent.loanId },
+    });
+
+    return await this.#result(
+      ref,
+      player.id,
+      `Repaid ${this.#money(amount)} to ${this.#displayName(loan.lender)}; ${this.#money(remaining - amount)} still owed.`,
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Pricing
   // -------------------------------------------------------------------------
@@ -906,6 +982,56 @@ export class EconomyEngine {
     const wallet = await this.#backend.getWalletByOwner(entityId);
     if (wallet === null) throw new UnknownWallet(entityId);
     return wallet;
+  }
+
+  /**
+   * The lender and total owed for a loan, read from the TakeLoan tx's structured `meta`. Throws
+   * UnknownLoan unless the tx really is a TakeLoan paid TO this actor, so one player cannot cite
+   * another's loan. Ownership is checked by owner id (bucket-suffix stripped), not WalletId
+   * equality, since TakeLoan's destination bucket is config-driven and not passed back in here.
+   */
+  async #requireLoan(tx: Tx | null, actorOwnerId: OwnerId): Promise<{ lender: OwnerId; owed: bigint }> {
+    const lender = tx?.memo.meta?.['lender'];
+    const owedRaw = tx?.memo.meta?.['owed'];
+    if (
+      tx === null ||
+      tx.kind !== 'transfer' ||
+      tx.memo.intent !== 'TakeLoan' ||
+      tx.to === null ||
+      typeof lender !== 'string' ||
+      lender === '' ||
+      typeof owedRaw !== 'string' ||
+      !/^[0-9]{1,30}$/.test(owedRaw)
+    ) {
+      throw new UnknownLoan('No such loan for this player');
+    }
+    const toWallet = await this.#backend.getWallet(tx.to);
+    if (toWallet === null || stripBucketSuffix(toWallet.ownerId) !== actorOwnerId) {
+      throw new UnknownLoan('No such loan for this player');
+    }
+    return { lender, owed: BigInt(owedRaw) };
+  }
+
+  /**
+   * Sum of every RepayLoan transfer OUT of `walletId` naming `loanId` — the full history of
+   * that one wallet, paged. There is no backend query by meta field, so this is the real cost
+   * of "how much has been repaid": bounded to one player's own repayment activity (see
+   * RepayLoanIntent), not every wallet in the economy.
+   */
+  async #repaidSoFar(walletId: WalletId, loanId: TxId): Promise<bigint> {
+    let total = 0n;
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.#backend.history(walletId, cursor);
+      for (const tx of page.txs) {
+        if (tx.kind === 'transfer' && tx.from === walletId && tx.memo.intent === 'RepayLoan' && tx.memo.meta?.['loan'] === loanId) {
+          total += tx.amount;
+        }
+      }
+      if (page.cursor === null) break;
+      cursor = page.cursor;
+    }
+    return total;
   }
 
   #memo(intent: Intent, detail?: string): Memo {

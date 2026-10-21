@@ -20,6 +20,7 @@ around crypto-related content.
 |---|---|
 | Intent router, config, entity wallets, admin funding | **[built]** |
 | Multi-bucket player wallets (cash / bank / dirty) + LaunderMoney | **[built]**; every operation defaults to cash, a server owner opts into bank/dirty per operation in config |
+| Loans (TakeLoan / RepayLoan): simple interest once at issuance, installments | **[built]**; "amount repaid so far" is a real history scan, not a stored running balance — see "Money buckets" section |
 | Memory + SQLite + Postgres backends, hash chain, integrity verification, checkpoints | **[built]** |
 | Standalone CLI simulator | **[built]** |
 | Solana backend | **[planned]**, not built |
@@ -206,6 +207,23 @@ way to see one is a process crash between the two writes, and even then every HD
 visibly sitting in a real wallet — nothing is burned or created, just not yet at its second
 destination. There is no automatic resumption for a stuck fee leg today.
 
+## Loans — [built]
+
+`TakeLoan` (any configured entity as lender -> player, the principal) and `RepayLoan` (player ->
+that lender, an installment or the final payment) are a real credit system, not a toy: interest
+is **simple**, charged **once** at issuance (`loans.interestPercent`, default 15%) — there is no
+daily/monthly accrual over time, and that's a deliberate v1 scope limit, not an oversight. The
+total owed (principal + interest) is computed once and stored in the `TakeLoan` tx's own `meta`,
+since ledger rows can never be mutated afterward.
+
+"How much has this player repaid toward loan X" has no stored running balance either — the
+engine has no query-by-meta-field index, so it is answered by scanning that player's
+`loans.repaymentBucket` wallet history for `RepayLoan` rows naming that loan id. `RepayLoan`
+always debits that one configured bucket (never overridable per call, unlike every other
+operation) specifically so this scan stays bounded to one player's own repayment activity
+rather than needing an index across the whole economy. Fine for a private friends server;
+would need real indexing before this holds up at a much larger scale.
+
 ## Intent catalog (v1) — [built]
 
 | Intent | Payer | Payee | Trigger |
@@ -223,6 +241,8 @@ destination. There is no automatic resumption for a stuck fee leg today.
 | `PlaceBet` | player | casino entity | the wager |
 | `SettleBet` | casino entity | player | pays out a WON bet, referencing the `PlaceBet` txId; a loss needs no call at all |
 | `LaunderMoney` | player's `dirty` bucket | player's own `cash`/`bank` (minus a cut to `laundering.feeEntity`) | the only way dirty money becomes spendable |
+| `TakeLoan` | any configured entity | player | disburses the principal; total owed (principal + simple interest) is fixed at issuance |
+| `RepayLoan` | player's `loans.repaymentBucket` | the loan's lender | an installment or the final payment; refuses to overpay or to pay a fully-repaid loan |
 | *(not an intent)* `fundEntity` | mint | entity | operator only |
 | *(not an intent)* `taxEntity` | entity | entity | operator/scheduled job only — the one operation with no player on either side (e.g. periodic business-to-government tax) |
 
@@ -248,6 +268,7 @@ The real format is JSON (`heist.config.json`, validated at load; there is no YAM
   "rentalEntity": "bike-rental-co",
   "walletBuckets": { "payout": "bank", "robberyProceeds": "dirty" },
   "laundering": { "cutPercent": "10", "feeEntity": "treasury" },
+  "loans": { "interestPercent": "15", "repaymentBucket": "cash" },
   "services": {
     "hospital_full_heal": { "entity": "hospital", "price": "200" },
     "gas_per_liter": { "entity": "gas-station-1", "price": "2" }

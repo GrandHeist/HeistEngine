@@ -28,11 +28,16 @@
     "theft": "cash",
     "depositToSociety": "cash",
     "robberyProceeds": "cash",
-    "bet": "cash"
+    "bet": "cash",
+    "loan": "cash"
   },
   "laundering": {
     "cutPercent": "10",
     "feeEntity": "treasury"
+  },
+  "loans": {
+    "interestPercent": "15",
+    "repaymentBucket": "cash"
   },
   "entities": [
     { "id": "treasury", "name": "City Treasury" },

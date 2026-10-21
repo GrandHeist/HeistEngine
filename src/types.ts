@@ -96,7 +96,9 @@ export type IntentType =
   | 'RobEntity'
   | 'PlaceBet'
   | 'SettleBet'
-  | 'LaunderMoney';
+  | 'LaunderMoney'
+  | 'TakeLoan'
+  | 'RepayLoan';
 
 export interface BaseIntent {
   type: IntentType;
@@ -218,6 +220,33 @@ export interface LaunderMoneyIntent extends BaseIntent {
   toBucket: 'cash' | 'bank';
 }
 
+/**
+ * any configured entity (the lender) -> player, principal only. Interest is calculated once,
+ * at issuance (`loans.interestPercent`, simple — not compounding), and stored in the tx's own
+ * `meta.owed` as the authoritative total due. There is no time-based accrual: v1 is flat
+ * interest charged once, not a running daily/monthly rate.
+ */
+export interface TakeLoanIntent extends BaseIntent {
+  type: 'TakeLoan';
+  lender: OwnerId;
+  principal: string;
+  /** Where the principal lands. Defaults to config's `walletBuckets.loan` if omitted. */
+  bucket?: WalletBucket;
+}
+/**
+ * player -> the loan's lender, an installment (or the final payment) toward what TakeLoan said
+ * was owed. Always debited from `loans.repaymentBucket` (not overridable per call) so "how much
+ * has this player repaid toward loan X" is answerable by scanning exactly one wallet's history —
+ * the engine has no secondary index by meta field, so this keeps that scan bounded to one
+ * player's own repayment activity rather than needing one across every lender.
+ */
+export interface RepayLoanIntent extends BaseIntent {
+  type: 'RepayLoan';
+  /** The `txId` TakeLoan returned. */
+  loanId: TxId;
+  amount: string;
+}
+
 export type Intent =
   | OpenAccountIntent
   | RentVehicleIntent
@@ -231,7 +260,9 @@ export type Intent =
   | RobEntityIntent
   | PlaceBetIntent
   | SettleBetIntent
-  | LaunderMoneyIntent;
+  | LaunderMoneyIntent
+  | TakeLoanIntent
+  | RepayLoanIntent;
 
 /** What the engine hands back to the adapter. The adapter renders this and nothing else. */
 export interface IntentResult {

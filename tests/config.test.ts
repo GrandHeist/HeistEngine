@@ -285,6 +285,35 @@ describe('config — laundering must resolve to a real entity AT LOAD TIME', () 
   });
 });
 
+describe('config — loans', () => {
+  test('defaults to 15% simple interest, repaid from cash', () => {
+    const config = validateConfig(withDefaults({}));
+    assert.equal(config.loans.interestPercent, '15');
+    assert.equal(config.loans.repaymentBucket, 'cash');
+  });
+
+  test('interestPercent follows the same 0-100 whole-percent grammar as laundering.cutPercent', () => {
+    throwsWithCode(
+      () => validateConfig(withDefaults({ loans: { interestPercent: '101' } })),
+      'INVALID_INTENT',
+      'interestPercent must not exceed 100',
+    );
+  });
+
+  test('repaymentBucket must be a real bucket', () => {
+    throwsWithCode(
+      () => validateConfig(withDefaults({ loans: { repaymentBucket: 'crypto' } })),
+      'INVALID_INTENT',
+      'only cash | bank | dirty are valid buckets',
+    );
+  });
+
+  test('walletBuckets.loan defaults to cash and is overridable like every other key', () => {
+    const config = validateConfig(withDefaults({ walletBuckets: { loan: 'bank' } }));
+    assert.equal(config.walletBuckets.loan, 'bank');
+  });
+});
+
 describe('config — an entity id may not contain "#"', () => {
   test('validateConfig rejects it — "#" is reserved for internal bucket wallet keys', () => {
     throwsWithCode(

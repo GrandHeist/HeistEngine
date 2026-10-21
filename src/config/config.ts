@@ -74,6 +74,7 @@ export interface HeistConfig {
     depositToSociety: WalletBucket;
     robberyProceeds: WalletBucket;
     bet: WalletBucket;
+    loan: WalletBucket;
   };
   /** LaunderMoney: converting `dirty` money into `cash`/`bank`, minus a cut. */
   laundering: {
@@ -81,6 +82,16 @@ export interface HeistConfig {
     cutPercent: string;
     /** Entity id that receives the cut. MUST match a configured entity. */
     feeEntity: string;
+  };
+  /** TakeLoan / RepayLoan. */
+  loans: {
+    /** Whole percent 0-100, charged once at issuance (simple interest, no accrual over time). */
+    interestPercent: string;
+    /**
+     * Every RepayLoan is debited from exactly this bucket — never overridden per call — so
+     * "how much has this player repaid" is one wallet's history, not every wallet they own.
+     */
+    repaymentBucket: WalletBucket;
   };
   entities: EntityConfig[];
   /**
@@ -268,10 +279,15 @@ export function defaultConfig(): HeistConfig {
       depositToSociety: 'cash',
       robberyProceeds: 'cash',
       bet: 'cash',
+      loan: 'cash',
     },
     laundering: {
       cutPercent: '10',
       feeEntity: 'treasury',
+    },
+    loans: {
+      interestPercent: '15',
+      repaymentBucket: 'cash',
     },
     entities: [
       { id: 'treasury', name: 'City Treasury' },
@@ -431,6 +447,23 @@ export function validateConfig(input: unknown, source = '<inline>'): HeistConfig
   }
   const laundering = { cutPercent: String(cutPercentRaw).trim(), feeEntity };
 
+  // loans --------------------------------------------------------------------
+  const loansRaw = input['loans'] ?? defaults.loans;
+  if (!isRecord(loansRaw)) {
+    throw new InvalidIntent(
+      `config (${source}): loans must be an object like { "interestPercent": "15", "repaymentBucket": "cash" }, got ${describe(loansRaw)}`,
+    );
+  }
+  const interestPercentRaw = loansRaw['interestPercent'] ?? defaults.loans.interestPercent;
+  parsePercent(interestPercentRaw, 'loans.interestPercent');
+  const repaymentBucketRaw = loansRaw['repaymentBucket'] ?? defaults.loans.repaymentBucket;
+  if (typeof repaymentBucketRaw !== 'string' || !isWalletBucket(repaymentBucketRaw)) {
+    throw new InvalidIntent(
+      `config (${source}): loans.repaymentBucket must be one of ${WALLET_BUCKETS.join(' | ')}, got ${describe(repaymentBucketRaw)}`,
+    );
+  }
+  const loans = { interestPercent: String(interestPercentRaw).trim(), repaymentBucket: repaymentBucketRaw };
+
   const admins = readAdmins(input['admins'], defaults.admins, entities, source);
 
   const config: HeistConfig = {
@@ -443,6 +476,7 @@ export function validateConfig(input: unknown, source = '<inline>'): HeistConfig
     rentalEntity,
     walletBuckets,
     laundering,
+    loans,
     entities,
     admins,
   };
