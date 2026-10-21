@@ -314,6 +314,41 @@ describe('config — loans', () => {
   });
 });
 
+describe('config — shares.businesses must resolve to a real entity AT LOAD TIME', () => {
+  test('defaults to no tradeable businesses at all', () => {
+    const config = validateConfig(withDefaults({}));
+    assert.deepEqual(config.shares.businesses, {});
+  });
+
+  test('a business key that is not a configured entity id is rejected', () => {
+    throwsWithCode(
+      () => validateConfig(withDefaults({ shares: { businesses: { 'not-an-entity': {} } } })),
+      'INVALID_INTENT',
+      'a mistyped business id must be a startup failure',
+    );
+  });
+
+  test('totalShares, when present, follows the same money grammar as any other amount', () => {
+    for (const totalShares of ['0', '-5', '1.5', 'abc']) {
+      throwsWithCode(
+        () => validateConfig(withDefaults({ shares: { businesses: { 'car-dealer': { totalShares } } } })),
+        'INVALID_INTENT',
+        `totalShares ${JSON.stringify(totalShares)} must be rejected`,
+      );
+    }
+  });
+
+  test('a business with no totalShares is accepted (the unlimited mint/burn model)', () => {
+    const config = validateConfig(withDefaults({ shares: { businesses: { 'car-dealer': {} } } }));
+    assert.deepEqual(config.shares.businesses, { 'car-dealer': {} });
+  });
+
+  test('a business with a valid totalShares is accepted (the fixed-float model)', () => {
+    const config = validateConfig(withDefaults({ shares: { businesses: { 'car-dealer': { totalShares: '1000000' } } } }));
+    assert.deepEqual(config.shares.businesses, { 'car-dealer': { totalShares: '1000000' } });
+  });
+});
+
 describe('config — an entity id may not contain "#"', () => {
   test('validateConfig rejects it — "#" is reserved for internal bucket wallet keys', () => {
     throwsWithCode(

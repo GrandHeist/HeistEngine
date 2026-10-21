@@ -98,7 +98,9 @@ export type IntentType =
   | 'SettleBet'
   | 'LaunderMoney'
   | 'TakeLoan'
-  | 'RepayLoan';
+  | 'RepayLoan'
+  | 'BuyShares'
+  | 'SellShares';
 
 export interface BaseIntent {
   type: IntentType;
@@ -247,6 +249,33 @@ export interface RepayLoanIntent extends BaseIntent {
   amount: string;
 }
 
+/**
+ * player -> business entity, `shares * pricePerShare`. `pricePerShare` is adapter-supplied, not
+ * engine-computed — same philosophy as PlaceBet/SettleBet's amounts: the engine settles money,
+ * it never decides a world fact (here, what a share is worth) for itself. If the business has a
+ * fixed float (`shares.businesses.<id>.totalShares` configured), this can only succeed while the
+ * business's unsold float actually has that many shares left — real scarcity, not a mint on
+ * demand. A business with no configured totalShares mints shares on demand instead; which model
+ * a given business uses is the server owner's per-business config choice.
+ */
+export interface BuySharesIntent extends BaseIntent {
+  type: 'BuyShares';
+  business: OwnerId;
+  shares: number;
+  pricePerShare: string;
+  /** Which bucket pays. Defaults to config's `walletBuckets.shares` if omitted. */
+  bucket?: WalletBucket;
+}
+/** The reverse of BuyShares: player -> gives shares back, business entity -> pays money. */
+export interface SellSharesIntent extends BaseIntent {
+  type: 'SellShares';
+  business: OwnerId;
+  shares: number;
+  pricePerShare: string;
+  /** Which bucket receives the proceeds. Defaults to config's `walletBuckets.shares` if omitted. */
+  bucket?: WalletBucket;
+}
+
 export type Intent =
   | OpenAccountIntent
   | RentVehicleIntent
@@ -262,7 +291,9 @@ export type Intent =
   | SettleBetIntent
   | LaunderMoneyIntent
   | TakeLoanIntent
-  | RepayLoanIntent;
+  | RepayLoanIntent
+  | BuySharesIntent
+  | SellSharesIntent;
 
 /** What the engine hands back to the adapter. The adapter renders this and nothing else. */
 export interface IntentResult {

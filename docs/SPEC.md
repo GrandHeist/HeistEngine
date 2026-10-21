@@ -20,7 +20,8 @@ around crypto-related content.
 |---|---|
 | Intent router, config, entity wallets, admin funding | **[built]** |
 | Multi-bucket player wallets (cash / bank / dirty) + LaunderMoney | **[built]**; every operation defaults to cash, a server owner opts into bank/dirty per operation in config |
-| Loans (TakeLoan / RepayLoan): simple interest once at issuance, installments | **[built]**; "amount repaid so far" is a real history scan, not a stored running balance — see "Money buckets" section |
+| Loans (TakeLoan / RepayLoan): simple interest once at issuance, installments | **[built]**; "amount repaid so far" is a real history scan, not a stored running balance — see "Loans" section |
+| Stock market (BuyShares / SellShares) | **[built]**; per-business config choice between a fixed float (real scarcity) and mint-on-demand — see "Stock market" section. No price simulation: `pricePerShare` is adapter-supplied, same as any other adapter-decided amount |
 | Memory + SQLite + Postgres backends, hash chain, integrity verification, checkpoints | **[built]** |
 | Standalone CLI simulator | **[built]** |
 | Solana backend | **[planned]**, not built |
@@ -224,6 +225,32 @@ operation) specifically so this scan stays bounded to one player's own repayment
 rather than needing an index across the whole economy. Fine for a private friends server;
 would need real indexing before this holds up at a much larger scale.
 
+## Stock market — [built]
+
+`BuyShares`/`SellShares` let players trade shares in any entity listed under
+`shares.businesses` in config — an opt-in list; an entity not listed there cannot be traded at
+all. Per business, the server owner picks one of two models:
+
+- **Fixed float** (`totalShares` set): that many shares are minted once, at genesis, into
+  `<businessId>#float` — a real, scarce supply. Buying moves shares out of the float into the
+  buyer's own holding (`<player>#shares:<businessId>`); selling moves them back. Once the float
+  is exhausted, buying fails with `INSUFFICIENT_FUNDS` — the same error a player gets for
+  overspending money, because share wallets use the exact same balance/transfer machinery as
+  money wallets; the ledger doesn't care what a bigint in a wallet represents.
+- **Mint-on-demand** (`totalShares` omitted): buying mints shares directly into the buyer's
+  holding; selling burns them. No float, no scarcity — simpler, and a legitimate per-business
+  choice, but not real ownership of a fixed pie.
+
+**What the engine deliberately does NOT do: decide a share's price.** `pricePerShare` is
+adapter-supplied on every `BuyShares`/`SellShares` call, exactly like `PlaceBet`/`SettleBet`'s
+amounts — the engine settles money and share counts, it never simulates a market or decides a
+world fact (what something is worth) for itself. A real price-discovery mechanism (random walk,
+order matching, whatever) belongs in the adapter or a layer above it, not in this ledger.
+
+**Not built**: dividends (would need enumerating every shareholder of a business — no such
+registry exists; would need one), and secondary player-to-player share trades at a
+market-clearing price (a matching-engine problem, out of scope here). Flagged, not forced in.
+
 ## Intent catalog (v1) — [built]
 
 | Intent | Payer | Payee | Trigger |
@@ -243,6 +270,8 @@ would need real indexing before this holds up at a much larger scale.
 | `LaunderMoney` | player's `dirty` bucket | player's own `cash`/`bank` (minus a cut to `laundering.feeEntity`) | the only way dirty money becomes spendable |
 | `TakeLoan` | any configured entity | player | disburses the principal; total owed (principal + simple interest) is fixed at issuance |
 | `RepayLoan` | player's `loans.repaymentBucket` | the loan's lender | an installment or the final payment; refuses to overpay or to pay a fully-repaid loan |
+| `BuyShares` | player | a tradeable business | `shares * pricePerShare`, adapter-priced; draws from the business's float if it has one, else mints |
+| `SellShares` | a tradeable business | player | the reverse; returns shares to the float if it has one, else burns them |
 | *(not an intent)* `fundEntity` | mint | entity | operator only |
 | *(not an intent)* `taxEntity` | entity | entity | operator/scheduled job only — the one operation with no player on either side (e.g. periodic business-to-government tax) |
 
@@ -269,6 +298,7 @@ The real format is JSON (`heist.config.json`, validated at load; there is no YAM
   "walletBuckets": { "payout": "bank", "robberyProceeds": "dirty" },
   "laundering": { "cutPercent": "10", "feeEntity": "treasury" },
   "loans": { "interestPercent": "15", "repaymentBucket": "cash" },
+  "shares": { "businesses": { "car-dealer": { "totalShares": "1000000" }, "realty-office": {} } },
   "services": {
     "hospital_full_heal": { "entity": "hospital", "price": "200" },
     "gas_per_liter": { "entity": "gas-station-1", "price": "2" }

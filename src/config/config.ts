@@ -75,6 +75,7 @@ export interface HeistConfig {
     robberyProceeds: WalletBucket;
     bet: WalletBucket;
     loan: WalletBucket;
+    shares: WalletBucket;
   };
   /** LaunderMoney: converting `dirty` money into `cash`/`bank`, minus a cut. */
   laundering: {
@@ -92,6 +93,14 @@ export interface HeistConfig {
      * "how much has this player repaid" is one wallet's history, not every wallet they own.
      */
     repaymentBucket: WalletBucket;
+  };
+  /**
+   * BuyShares / SellShares. Only entity ids listed here are tradeable at all. A listed business
+   * with `totalShares` set has a fixed float (real scarcity, seeded once at genesis into
+   * `<id>#float`); one with it omitted mints/burns shares on demand instead. Per-business choice.
+   */
+  shares: {
+    businesses: Record<string, { totalShares?: string }>;
   };
   entities: EntityConfig[];
   /**
@@ -280,6 +289,7 @@ export function defaultConfig(): HeistConfig {
       robberyProceeds: 'cash',
       bet: 'cash',
       loan: 'cash',
+      shares: 'cash',
     },
     laundering: {
       cutPercent: '10',
@@ -288,6 +298,9 @@ export function defaultConfig(): HeistConfig {
     loans: {
       interestPercent: '15',
       repaymentBucket: 'cash',
+    },
+    shares: {
+      businesses: {},
     },
     entities: [
       { id: 'treasury', name: 'City Treasury' },
@@ -464,6 +477,9 @@ export function validateConfig(input: unknown, source = '<inline>'): HeistConfig
   }
   const loans = { interestPercent: String(interestPercentRaw).trim(), repaymentBucket: repaymentBucketRaw };
 
+  // shares ---------------------------------------------------------------
+  const shares = readShares(input['shares'], defaults.shares, entityIds, source);
+
   const admins = readAdmins(input['admins'], defaults.admins, entities, source);
 
   const config: HeistConfig = {
@@ -477,6 +493,7 @@ export function validateConfig(input: unknown, source = '<inline>'): HeistConfig
     walletBuckets,
     laundering,
     loans,
+    shares,
     entities,
     admins,
   };
@@ -636,6 +653,59 @@ function readWalletBuckets(
     }
   }
   return out;
+}
+
+/**
+ * The tradeable-businesses catalog, checking every key against the configured entity ids. An
+ * unknown entity throws at load, same as readServices — a typo must never be a silent "not
+ * tradeable" at runtime.
+ */
+function readShares(
+  raw: unknown,
+  fallback: HeistConfig['shares'],
+  entityIds: ReadonlySet<string>,
+  source: string,
+): HeistConfig['shares'] {
+  const input = raw === undefined || raw === null ? fallback : raw;
+  if (!isRecord(input)) {
+    throw new InvalidIntent(`config (${source}): shares must be an object, got ${describe(input)}`);
+  }
+  const businessesRaw = input['businesses'] ?? fallback.businesses;
+  if (!isRecord(businessesRaw)) {
+    throw new InvalidIntent(
+      `config (${source}): shares.businesses must be an object of entity id -> { totalShares? }, got ${describe(businessesRaw)}`,
+    );
+  }
+
+  const businesses: Record<string, { totalShares?: string }> = {};
+  for (const [key, value] of Object.entries(businessesRaw)) {
+    if (key === '__proto__') {
+      throw new InvalidIntent(`config (${source}): shares.businesses may not use the key "__proto__"`);
+    }
+    if (!entityIds.has(key)) {
+      throw new InvalidIntent(
+        `config (${source}): shares.businesses has "${key}", which is not a configured entity id. ` +
+          `Add it to "entities" or point shares.businesses at one of: ${[...entityIds].join(', ')}`,
+      );
+    }
+    if (!isRecord(value)) {
+      throw new InvalidIntent(
+        `config (${source}): shares.businesses.${key} must be an object like {} or { "totalShares": "100000" }, got ${describe(value)}`,
+      );
+    }
+    const totalSharesRaw = value['totalShares'];
+    if (totalSharesRaw === undefined || totalSharesRaw === null) {
+      businesses[key] = {};
+      continue;
+    }
+    requirePositiveAtLoad(
+      parseAmount(totalSharesRaw as string, `shares.businesses.${key}.totalShares`),
+      `shares.businesses.${key}.totalShares`,
+      source,
+    );
+    businesses[key] = { totalShares: String(totalSharesRaw).trim() };
+  }
+  return { businesses };
 }
 
 function readAdmins(

@@ -56,6 +56,7 @@ import type { Custody } from './custody.ts';
 import { Mutex } from './mutex.ts';
 import type {
   BuyServiceIntent,
+  BuySharesIntent,
   DepositToSocietyIntent,
   EngineResponse,
   FineIntent,
@@ -71,6 +72,7 @@ import type {
   RepayLoanIntent,
   ReturnVehicleIntent,
   RobEntityIntent,
+  SellSharesIntent,
   SettleBetIntent,
   TakeLoanIntent,
   TheftIntent,
@@ -115,6 +117,7 @@ const INITIATOR_IS_RECIPIENT: ReadonlySet<string> = new Set([
   'RobEntity',
   'SettleBet',
   'TakeLoan',
+  'SellShares',
 ]);
 
 /** Longest fine reason kept in a memo. */
@@ -188,6 +191,18 @@ export class EconomyEngine {
     }
     for (const entity of this.#config.entities) {
       await this.#ensureWallet(entity.id, true);
+    }
+
+    // Fixed-float tradeable businesses get their total share count minted into `<id>#float`
+    // exactly once, ever — real scarcity from genesis, not minted per-trade. A deterministic
+    // nonce makes this safe to run again on every restart.
+    for (const [businessId, entry] of Object.entries(this.#config.shares.businesses)) {
+      if (entry.totalShares === undefined) continue;
+      const genesisNonce = `float-genesis:${businessId}`;
+      if (await this.#backend.hasNonce(genesisNonce)) continue;
+      const float = await this.#ensureWallet(`${businessId}#float`, false);
+      const totalShares = parseAmount(entry.totalShares, `shares.businesses.${businessId}.totalShares`);
+      await this.#backend.mint(float.id, totalShares, { intent: 'ShareFloatGenesis', nonce: genesisNonce });
     }
   }
 
@@ -353,6 +368,10 @@ export class EconomyEngine {
         return await this.#takeLoan(intent);
       case 'RepayLoan':
         return await this.#repayLoan(intent);
+      case 'BuyShares':
+        return await this.#buyShares(intent);
+      case 'SellShares':
+        return await this.#sellShares(intent);
       default:
         throw new InvalidIntent(`Unknown intent type ${JSON.stringify(unknownType(intent))}`);
     }
@@ -884,6 +903,98 @@ export class EconomyEngine {
     );
   }
 
+  /**
+   * player's money -> business, `shares * pricePerShare`; shares move the other way. Two
+   * ledger writes (money, then shares), same reasoning as LaunderMoney: a transfer only ever
+   * moves one thing between two wallets, and this moves two different things. A fixed-float
+   * business draws shares out of `<id>#float`, so this fails with INSUFFICIENT_FUNDS — same
+   * error a player would get overspending money — once the float runs out; an unlimited
+   * business just mints the shares bought.
+   */
+  async #buyShares(intent: BuySharesIntent): Promise<IntentResult> {
+    const shareCount = requireWholeCount(intent.shares, 'shares');
+    const pricePerShare = this.#intentAmount(intent.pricePerShare, 'pricePerShare');
+    const cost = pricePerShare * BigInt(shareCount);
+    requirePositive(cost, 'cost');
+
+    const float = this.#requireTradeable(intent.business);
+    const business = await this.#requireEntityWallet(intent.business);
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.shares);
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const money = await this.#bucketWallet(basePlayer, bucket);
+    const playerShares = await this.#shareWallet(basePlayer, intent.business);
+
+    const ref = await this.#backend.transfer(money.id, business.id, cost, {
+      ...this.#memo(intent, `bought ${shareCount} shares of ${this.#displayName(intent.business)}`),
+      meta: { business: intent.business, shares: String(shareCount) },
+    });
+
+    if (float.totalShares !== null) {
+      const floatWallet = await this.#floatWallet(intent.business);
+      await this.#backend.transfer(floatWallet.id, playerShares.id, BigInt(shareCount), {
+        intent: intent.type,
+        nonce: `${intent.nonce}:shares`,
+        detail: `${shareCount} shares of ${this.#displayName(intent.business)} from the float`,
+      });
+    } else {
+      await this.#backend.mint(playerShares.id, BigInt(shareCount), {
+        intent: intent.type,
+        nonce: `${intent.nonce}:shares`,
+        detail: `${shareCount} shares of ${this.#displayName(intent.business)}, minted on demand`,
+      });
+    }
+
+    const newShares = await this.#balanceOrNull(playerShares.id);
+    return {
+      ok: true,
+      txId: ref.txId,
+      hash: ref.hash,
+      newBalance: newShares,
+      message: `Bought ${shareCount} shares of ${this.#displayName(intent.business)} for ${this.#money(cost)}. You now hold ${newShares ?? '?'} shares.`,
+    };
+  }
+
+  /** The reverse of #buyShares: shares move to the business/float, money moves to the player. */
+  async #sellShares(intent: SellSharesIntent): Promise<IntentResult> {
+    const shareCount = requireWholeCount(intent.shares, 'shares');
+    const pricePerShare = this.#intentAmount(intent.pricePerShare, 'pricePerShare');
+    const proceeds = pricePerShare * BigInt(shareCount);
+    requirePositive(proceeds, 'proceeds');
+
+    const float = this.#requireTradeable(intent.business);
+    const business = await this.#requireEntityWallet(intent.business);
+    const bucket = this.#resolveBucket(intent.bucket, this.#config.walletBuckets.shares);
+    const basePlayer = await this.#requirePlayerWallet(intent.actor, 'actor');
+    const money = await this.#bucketWallet(basePlayer, bucket);
+    const playerShares = await this.#shareWallet(basePlayer, intent.business);
+
+    if (float.totalShares !== null) {
+      const floatWallet = await this.#floatWallet(intent.business);
+      await this.#backend.transfer(playerShares.id, floatWallet.id, BigInt(shareCount), {
+        intent: intent.type,
+        nonce: `${intent.nonce}:shares`,
+        detail: `${shareCount} shares of ${this.#displayName(intent.business)} back to the float`,
+      });
+    } else {
+      await this.#backend.burn(playerShares.id, BigInt(shareCount), {
+        intent: intent.type,
+        nonce: `${intent.nonce}:shares`,
+        detail: `${shareCount} shares of ${this.#displayName(intent.business)}, burned on sale`,
+      });
+    }
+
+    const ref = await this.#backend.transfer(business.id, money.id, proceeds, {
+      ...this.#memo(intent, `sold ${shareCount} shares of ${this.#displayName(intent.business)}`),
+      meta: { business: intent.business, shares: String(shareCount) },
+    });
+
+    return await this.#result(
+      ref,
+      money.id,
+      `Sold ${shareCount} shares of ${this.#displayName(intent.business)} for ${this.#money(proceeds)}.`,
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Pricing
   // -------------------------------------------------------------------------
@@ -923,6 +1034,35 @@ export class EconomyEngine {
   async #bucketWallet(player: Wallet, bucket: WalletBucket): Promise<Wallet> {
     if (bucket === 'cash') return player;
     return await this.#ensureWallet(`${player.ownerId}#${bucket}`, false);
+  }
+
+  /** A player's share-holding wallet for one business — `${base}#shares:<business>`, lazy. */
+  async #shareWallet(player: Wallet, business: OwnerId): Promise<Wallet> {
+    return await this.#ensureWallet(`${player.ownerId}#shares:${business}`, false);
+  }
+
+  /** A fixed-float business's unsold-shares wallet — `${business}#float`. Seeded once in init(). */
+  async #floatWallet(business: OwnerId): Promise<Wallet> {
+    return await this.#ensureWallet(`${business}#float`, false);
+  }
+
+  /** The configured float cap for a tradeable business, or throws if it isn't one at all. */
+  #requireTradeable(business: unknown): { totalShares: bigint | null } {
+    if (typeof business !== 'string' || business === '') {
+      throw new InvalidIntent('business must be a non-empty string');
+    }
+    const entry = own(this.#config.shares.businesses, business);
+    if (entry === undefined) {
+      throw new InvalidIntent(
+        `"${business}" is not a tradeable business — add it to config under shares.businesses`,
+      );
+    }
+    return {
+      totalShares:
+        entry.totalShares === undefined
+          ? null
+          : parseAmount(entry.totalShares, `shares.businesses.${business}.totalShares`),
+    };
   }
 
   /** Create the wallet if absent, minting the keypair through Custody first. */

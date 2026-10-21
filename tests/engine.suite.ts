@@ -1311,6 +1311,132 @@ export function engineSuite(factory: BackendFactory): void {
     });
   });
 
+  describe(`EconomyEngine — stock market [${factory.label}]`, () => {
+    async function tradeableEngine(businesses: Record<string, { totalShares?: string }>): Promise<EconomyEngine> {
+      const config = { ...testConfig(), shares: { businesses } };
+      const e = new EconomyEngine({ backend, custody, config });
+      await e.init();
+      return e;
+    }
+
+    async function shareBalanceOf(owner: string, business: string): Promise<bigint> {
+      return await balanceOf(`${owner}#shares:${business}`);
+    }
+
+    test('buying shares of an unconfigured business is refused, not silently allowed', async () => {
+      await openAccount('player-1');
+      expectFail(
+        await engine.submit({
+          type: 'BuyShares', nonce: nonce('buy'), actor: 'player-1',
+          business: 'car-dealer', shares: 10, pricePerShare: '5',
+        }),
+        'INVALID_INTENT',
+      );
+    });
+
+    test('a fixed-float business: buying draws down the float, selling returns it, and the float cannot be oversold', async () => {
+      await openAccount('player-1');
+      const market = await tradeableEngine({ 'car-dealer': { totalShares: '1000' } });
+
+      const bought = expectOk(
+        await market.submit({
+          type: 'BuyShares', nonce: nonce('buy'), actor: 'player-1',
+          business: 'car-dealer', shares: 100, pricePerShare: '5',
+        }),
+      );
+      assert.equal(bought.newBalance, 100n, 'reports the player\'s new share count');
+      assert.equal(await balanceOf('player-1'), WELCOME_GRANT - 500n, '100 shares * 5 HD');
+      assert.equal(await balanceOf('car-dealer'), 500n);
+      assert.equal(await shareBalanceOf('player-1', 'car-dealer'), 100n);
+      assert.equal(await balanceOf('car-dealer#float'), 900n, 'the float wallet is "car-dealer#float" by owner id');
+
+      // Buying more than the remaining float has is a real scarcity failure, not a mint.
+      expectFail(
+        await market.submit({
+          type: 'BuyShares', nonce: nonce('buy'), actor: 'player-1',
+          business: 'car-dealer', shares: 901, pricePerShare: '5',
+        }),
+        'INSUFFICIENT_FUNDS',
+      );
+
+      const sold = expectOk(
+        await market.submit({
+          type: 'SellShares', nonce: nonce('sell'), actor: 'player-1',
+          business: 'car-dealer', shares: 40, pricePerShare: '6',
+        }),
+      );
+      assert.equal(sold.newBalance, WELCOME_GRANT - 500n + 240n, '40 shares * 6 HD proceeds, in cash');
+      assert.equal(await shareBalanceOf('player-1', 'car-dealer'), 60n);
+    });
+
+    test('an unlimited business mints shares on buy and burns them on sale — no float wallet involved', async () => {
+      await openAccount('player-1');
+      const market = await tradeableEngine({ 'realty-office': {} });
+
+      expectOk(
+        await market.submit({
+          type: 'BuyShares', nonce: nonce('buy'), actor: 'player-1',
+          business: 'realty-office', shares: 50, pricePerShare: '10',
+        }),
+      );
+      assert.equal(await shareBalanceOf('player-1', 'realty-office'), 50n);
+      assert.equal(await balanceOf('realty-office'), 500n);
+
+      expectFail(
+        await market.submit({
+          type: 'SellShares', nonce: nonce('sell'), actor: 'player-1',
+          business: 'realty-office', shares: 51, pricePerShare: '10',
+        }),
+        'INSUFFICIENT_FUNDS', // can't sell more shares than you hold
+      );
+
+      expectOk(
+        await market.submit({
+          type: 'SellShares', nonce: nonce('sell'), actor: 'player-1',
+          business: 'realty-office', shares: 50, pricePerShare: '10',
+        }),
+      );
+      assert.equal(await shareBalanceOf('player-1', 'realty-office'), 0n);
+    });
+
+    test('a replayed BuyShares/SellShares nonce returns the original result, not a double trade', async () => {
+      await openAccount('player-1');
+      const market = await tradeableEngine({ 'realty-office': {} });
+
+      const buy1 = expectOk(
+        await market.submit({
+          type: 'BuyShares', nonce: 'buy-once', actor: 'player-1',
+          business: 'realty-office', shares: 50, pricePerShare: '10',
+        }),
+      );
+      const buy2 = expectOk(
+        await market.submit({
+          type: 'BuyShares', nonce: 'buy-once', actor: 'player-1',
+          business: 'realty-office', shares: 50, pricePerShare: '10',
+        }),
+      );
+      assert.equal(buy2.txId, buy1.txId);
+      assert.equal(buy2.replayed, true);
+      assert.equal(await shareBalanceOf('player-1', 'realty-office'), 50n, 'only minted once');
+
+      const sell1 = expectOk(
+        await market.submit({
+          type: 'SellShares', nonce: 'sell-once', actor: 'player-1',
+          business: 'realty-office', shares: 20, pricePerShare: '10',
+        }),
+      );
+      const sell2 = expectOk(
+        await market.submit({
+          type: 'SellShares', nonce: 'sell-once', actor: 'player-1',
+          business: 'realty-office', shares: 20, pricePerShare: '10',
+        }),
+      );
+      assert.equal(sell2.txId, sell1.txId);
+      assert.equal(sell2.replayed, true);
+      assert.equal(await shareBalanceOf('player-1', 'realty-office'), 30n, 'only sold once');
+    });
+  });
+
   describe(`EconomyEngine — replay protection [${factory.label}]`, () => {
     test('a replayed OpenAccount nonce returns the original result and does not double-grant', async () => {
       const first = expectOk(
